@@ -1,0 +1,97 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+export const ROOT = path.resolve(here, '..');
+
+const NET_ROOT = process.env.FRIBOI_NET_ROOT ?? 'S:\\FRIBOI\\zzz Gestão Pedidos';
+
+const splitDirs = (value) =>
+  value
+    ? value
+        .split(';')
+        .map((p) => p.trim())
+        .filter(Boolean)
+    : null;
+
+export const XLSX_DIRS = splitDirs(process.env.FRIBOI_XLSX_DIRS) ?? [
+  path.join(NET_ROOT, '@ Acompanhamento Pedido CXS'),
+  path.join(NET_ROOT, '@@ ResumoSemanal CXS'),
+  path.join(NET_ROOT, '@@ ResumoSemanal PÇS'),
+];
+
+export const PDF_DIRS = splitDirs(process.env.FRIBOI_PDF_DIRS) ?? [path.join(ROOT, 'pedidos-pdf')];
+
+export const DB_FILE = process.env.FRIBOI_DB ?? path.join(ROOT, 'data', 'expedicao.db');
+export const DIST_DIR = path.join(ROOT, 'dist');
+export const PORT = Number(process.env.PORT ?? 8787);
+export const HOST = process.env.FRIBOI_HOST ?? '0.0.0.0';
+export const POLL_INTERVAL = Number(process.env.FRIBOI_POLL_MS ?? 15000);
+
+/** Pasta de relatórios onde as anomalias são arquivadas (criamos arquivos novos, nunca editamos os existentes). */
+export const ANEXO_ROOT = process.env.FRIBOI_ANEXO_ROOT ?? 'S:\\FRIBOI\\infos relatorios';
+export const SPOOL_DIR = path.join(ROOT, 'data', 'anexos-fila');
+export const ANEXO_MAX_BYTES = Number(process.env.FRIBOI_ANEXO_MAX ?? 25 * 1024 * 1024);
+
+/**
+ * Chave do acesso de fora (rede privada). Pode vir da variável de ambiente; sem ela geramos uma
+ * na primeira execução e guardamos em data/chave-visita.txt, para o link continuar válido depois de
+ * reiniciar o servidor.
+ */
+export const VISITA_CHAVE_ARQUIVO = path.join(ROOT, 'data', 'chave-visita.txt');
+
+function chaveVisita() {
+  if (process.env.FRIBOI_TOKEN_VISITA) return process.env.FRIBOI_TOKEN_VISITA;
+  try {
+    const guardada = fs.readFileSync(VISITA_CHAVE_ARQUIVO, 'utf8').trim();
+    if (guardada) return guardada;
+  } catch {
+    // ainda não existe
+  }
+  const nova = randomBytes(24).toString('hex');
+  try {
+    fs.mkdirSync(path.dirname(VISITA_CHAVE_ARQUIVO), { recursive: true });
+    fs.writeFileSync(VISITA_CHAVE_ARQUIVO, `${nova}\n`);
+  } catch {
+    console.warn('não consegui guardar a chave de visita em data/chave-visita.txt');
+  }
+  return nova;
+}
+
+export const VISITA_TOKEN = chaveVisita();
+export const VISITA_DIAS = Number(process.env.FRIBOI_VISITA_DIAS ?? 30);
+
+/** Senha da área administrativa (importação, ajustes, servidor). Guardamos só o hash. */
+export const SENHA_ARQUIVO = path.join(ROOT, 'data', 'senha-admin.txt');
+export const SENHA_AMBIENTE = process.env.FRIBOI_SENHA ?? '';
+export const ADMIN_HORAS = Number(process.env.FRIBOI_SESSAO_ADMIN_HORAS ?? 12);
+
+/** Endereço que as outras máquinas da rede usam para chegar neste servidor. */
+const rangePrivada = (ip) =>
+  /^10\./.test(ip) || /^192\.168\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
+
+export function lanUrl() {
+  const adapters = Object.values(os.networkInterfaces())
+    .flat()
+    .filter((item) => item && !item.internal && item.family === 'IPv4');
+  // o túnel (100.64/10) não é a rede do escritório: link LAN continua apontando para o adaptador físico
+  const fisicas = adapters.filter(
+    (item) => !/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(item.address),
+  );
+  const adapter = fisicas.find((item) => rangePrivada(item.address)) ?? fisicas[0] ?? adapters[0];
+  return adapter ? `http://${adapter.address}:${PORT}` : null;
+}
+
+/** Endereços do túnel, para o painel mostrar o link que a pessoa de fora deve usar. */
+export function tunnelUrl() {
+  const adapter = Object.values(os.networkInterfaces())
+    .flat()
+    .find(
+      (item) => item && !item.internal && item.family === 'IPv4' && /^100\./.test(item.address),
+    );
+  return adapter ? `http://${adapter.address}:${PORT}` : null;
+}
