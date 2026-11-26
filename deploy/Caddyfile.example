@@ -1,0 +1,8 @@
+# Use somente um nome DNS interno e restrinja o acesso por VPN/firewall.
+# Troque o domínio e a faixa pela rede privada realmente usada.
+hajan.intra.example {
+	@fora_da_vpn not remote_ip 10.8.0.0/24
+	respond @fora_da_vpn "Acesso permitido somente pela VPN." 403
+	tls internal
+	reverse_proxy 127.0.0.1:8501
+}

@@ -1,0 +1,29 @@
+.venv/
+.runtime/
+portable_python/
+bin/
+obj/
+offline_wheels/
+python-3.14.2-amd64.exe
+__pycache__/
+*.py[cod]
+Infos Clientes.xlsx
+Infos Produtos.xlsx
+Infos Limite Disponível.xlsx
+CARTEIRA DE TERCEIRO - DIVISÃO 1.xlsx
+Infos Unidades.xlsx
+codigos produtos tabela precos Friboi.xlsx
+*.db
+hajan_pedidos.db*
+HAJAN-Emissor-Local.zip
+HAJAN-Emissor-Offline.zip
+.env
+.env.*
+!.env.example
+data/
+secrets/*
+!secrets/.gitkeep
+*.log
+*.exe
+app.py.backup-*
+*.bat.backup*

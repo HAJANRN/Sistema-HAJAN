@@ -1,0 +1,36 @@
+services:
+  emissor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      HAJAN_DATA_DIR: /data
+      HAJAN_DATABASE_PATH: /data/hajan_pedidos.db
+      HAJAN_EXPORT_DIR: /data/exports
+      HAJAN_LOG_DIR: /data/logs
+      FRIBOI_CARTEIRA_DIR: ${FRIBOI_CARTEIRA_DIR:-/data/import/carteira}
+      FRIBOI_CREDITO_JSON: ${FRIBOI_CREDITO_JSON:-/data/import/decisao_credito.json}
+      FRIBOI_USUARIO: ${FRIBOI_USUARIO:?Defina FRIBOI_USUARIO no arquivo .env}
+      FRIBOI_SENHA_ARQUIVO: /run/secrets/senha-compartilhada
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - ./data:/data
+    secrets:
+      - senha-compartilhada
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+secrets:
+  senha-compartilhada:
+    file: ./secrets/senha-admin.txt
