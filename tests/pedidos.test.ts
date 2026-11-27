@@ -3,7 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { after, test } from 'node:test';
-import { montarApi } from './helpers.ts';
+import { montarApi, RAIZ } from './helpers.ts';
+
+/** Pasta do repositório que o servidor usaria sem `FRIBOI_PDF_LOCAL_DIR`: a suíte não pode tocar nela. */
+const PDFS_NO_REPO = path.join(RAIZ, 'pedidos-pdf');
+const pdfsNoRepo = () => (fs.existsSync(PDFS_NO_REPO) ? fs.readdirSync(PDFS_NO_REPO).sort() : []);
+const pdfsNoRepoAntes = pdfsNoRepo();
 
 const api = await montarApi();
 after(() => api.fechar());
@@ -42,9 +47,11 @@ test('gera PDF, grava histórico e clone, e serve o download', async () => {
   assert.equal(resultado.pedido.registradoNoHistorico, true);
   assert.match(resultado.arquivo, /^Pedido Hajan .* nº 7001 \(Embarque MRB 27\.11\.26\)\.pdf$/);
 
-  const pdf = path.join(api.pdfs, resultado.arquivo);
-  assert.ok(fs.existsSync(pdf), 'PDF não foi gravado na pasta configurada');
-  assert.equal(fs.readFileSync(pdf).subarray(0, 4).toString(), '%PDF');
+  for (const pasta of [api.pdfs, api.pdfsLocal]) {
+    const pdf = path.join(pasta, resultado.arquivo);
+    assert.ok(fs.existsSync(pdf), `PDF não foi gravado em ${pasta}`);
+    assert.equal(fs.readFileSync(pdf).subarray(0, 4).toString(), '%PDF');
+  }
 
   const db = new DatabaseSync(api.db, { readOnly: true });
   const historico = db
@@ -124,7 +131,82 @@ test('sem PÇS nem CXS grava PDF mas não grava histórico', async () => {
   assert.ok(resultado.avisos.length > 0);
 });
 
+test('categoria vazia conta como PÇS no histórico', async () => {
+  const resposta = await api.post(
+    '/api/emissor/pedidos',
+    corpo({
+      numero: '7006',
+      entregas: [
+        {
+          cliente: 'Cliente A',
+          operacao: 3,
+          destino: 'SEM DESTINO',
+          pesoManual: null,
+          produtos: [
+            { codigo: 'TST1', descricao: 'PATINHO', qtd: 1, unidade: 'CX', peso: 15.5, preco: 10, prazo: '30', categoria: '' },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.equal(resposta.status, 200);
+
+  const db = new DatabaseSync(api.db, { readOnly: true });
+  const linhas = db
+    .prepare("SELECT linhas FROM emissor_pedidos_semana WHERE numero = '7006' AND categoria = 'PÇS'")
+    .get();
+  db.close();
+  assert.ok(linhas, 'categoria vazia deveria cair em PÇS');
+  // histórico PÇS com linha dentro: o padrão de categoria tem que valer também no `linhasHistorico`
+  assert.equal(JSON.parse(linhas.linhas).length, 1);
+  assert.equal(JSON.parse(linhas.linhas)[0].destino, 'SEM DESTINO');
+});
+
+test('falha no meio da transação desfaz o histórico do número', async () => {
+  // tira a coluna `payload` do clone: o INSERT do histórico passa, o do clone falha dentro da
+  // mesma transação — nada desse número pode sobrar em `emissor_pedidos_semana`
+  const banco = new DatabaseSync(api.db);
+  banco.exec('ALTER TABLE emissor_pedidos_clonagem RENAME COLUMN payload TO payload_indisponivel');
+  let resposta: Response;
+  try {
+    resposta = await api.post('/api/emissor/pedidos', corpo({ numero: '7005' }));
+    assert.equal(resposta.status, 500);
+    const corpoErro = await resposta.json();
+    assert.equal(corpoErro.ok, undefined);
+    assert.ok(corpoErro.error, 'erro deveria sair como JSON');
+  } finally {
+    banco.exec('ALTER TABLE emissor_pedidos_clonagem RENAME COLUMN payload_indisponivel TO payload');
+    banco.close();
+  }
+
+  const db = new DatabaseSync(api.db, { readOnly: true });
+  const historico = db
+    .prepare('SELECT COUNT(*) c FROM emissor_pedidos_semana WHERE numero = ?')
+    .get('7005').c;
+  const clone = db
+    .prepare('SELECT COUNT(*) c FROM emissor_pedidos_clonagem WHERE numero = ?')
+    .get('7005').c;
+  db.close();
+  assert.equal(historico, 0, 'ROLLBACK deveria desfazer o histórico do número 7005');
+  assert.equal(clone, 0);
+});
+
 test('nome de PDF fora do padrão é recusado no download', async () => {
   const resposta = await api.get('/api/emissor/pedidos/pdf/..%5Csenha-admin.txt');
   assert.equal(resposta.status, 400);
+});
+
+test('download de PDF inexistente responde 404 em JSON', async () => {
+  const resposta = await api.get('/api/emissor/pedidos/pdf/pedido.pdf');
+  assert.equal(resposta.status, 404);
+  assert.match(resposta.headers.get('content-type') ?? '', /application\/json/);
+  assert.match((await resposta.json()).error, /PDF não encontrado/);
+});
+
+test('a suíte não grava PDFs na pasta do repositório', () => {
+  assert.deepEqual(
+    pdfsNoRepo(),
+    pdfsNoRepoAntes,
+    'PDF de teste caiu em <repositório>/pedidos-pdf; o teste deveria usar FRIBOI_PDF_LOCAL_DIR',
+  );
 });

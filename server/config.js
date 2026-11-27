@@ -26,9 +26,16 @@ export const XLSX_DIRS = splitDirs(process.env.FRIBOI_XLSX_DIRS) ?? [
   path.join(PEDIDOS_ROOT, 'CHQ'),
 ];
 
+/**
+ * Pasta local (nesta máquina) do PDF do pedido: é de onde o download serve o arquivo, porque a
+ * pasta de rede pode estar fora do ar na hora do GET. Nos testes aponta para um diretório
+ * temporário, para a suíte não espalhar PDFs dentro do repositório.
+ */
+export const PDF_LOCAL_DIR = process.env.FRIBOI_PDF_LOCAL_DIR ?? path.join(ROOT, 'pedidos-pdf');
+
 export const PDF_DIRS = splitDirs(process.env.FRIBOI_PDF_DIRS) ?? [
   path.join(NET_ROOT, 'Pedidos Ped+'),
-  path.join(ROOT, 'pedidos-pdf'),
+  PDF_LOCAL_DIR,
 ];
 
 /** Pasta onde o ERP exporta "CARTEIRA DE TERCEIRO*.xlsx". */

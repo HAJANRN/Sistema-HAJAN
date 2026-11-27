@@ -12,6 +12,7 @@ export interface Api {
   dir: string;
   db: string;
   pdfs: string;
+  pdfsLocal: string;
   clones: string;
   carteira: string;
   url: string;
@@ -51,12 +52,16 @@ export async function montarApi(): Promise<Api> {
   const db = path.join(dir, 'hajan.db');
   copiarBanco(origem, db);
   const pdfs = path.join(dir, 'pdfs');
+  const pdfsLocal = path.join(dir, 'pdfs-local');
   const clones = path.join(dir, 'clones');
   const carteira = path.join(dir, 'carteira');
-  for (const pasta of [pdfs, clones, carteira]) fs.mkdirSync(pasta, { recursive: true });
+  for (const pasta of [pdfs, pdfsLocal, clones, carteira]) fs.mkdirSync(pasta, { recursive: true });
 
   process.env.FRIBOI_DB = db;
   process.env.FRIBOI_PDF_DIRS = pdfs;
+  // pasta local do PDF e do download: temporária, para a suíte não gravar nada em
+  // <raiz do repositório>/pedidos-pdf nem servir PDF do disco de desenvolvimento
+  process.env.FRIBOI_PDF_LOCAL_DIR = pdfsLocal;
   process.env.FRIBOI_CLONES_DIR = clones;
   process.env.FRIBOI_CARTEIRA_DIR = carteira;
   process.env.FRIBOI_CREDITO_JSON = path.join(carteira, 'media_compras.json');
@@ -77,6 +82,7 @@ export async function montarApi(): Promise<Api> {
     dir,
     db,
     pdfs,
+    pdfsLocal,
     clones,
     carteira,
     url,

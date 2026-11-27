@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { CLONES_DIR, DB_FILE, PDF_DIRS, ROOT } from './config.js';
+import { CLONES_DIR, DB_FILE, PDF_DIRS, PDF_LOCAL_DIR } from './config.js';
 import { gravar, ler, responderSemBanco } from './emissorBanco.js';
 import { carteira } from './emissorCarteira.js';
 import { gerarPdf } from './emissorPdf.js';
@@ -156,7 +156,7 @@ function siglaDaUnidade(unidade) {
 
 function pastasDoPdf() {
   const pastas = PDF_DIRS.filter((dir) => fs.existsSync(dir));
-  const local = path.join(ROOT, 'pedidos-pdf');
+  const local = PDF_LOCAL_DIR;
   if (!pastas.includes(local)) {
     try {
       fs.mkdirSync(local, { recursive: true });
@@ -243,10 +243,13 @@ router.post('/pedidos', async (req, res) => {
           peso: Number(doCatalogo?.peso ?? produto.peso ?? 1) || 1,
           preco: Number(produto.preco ?? 0) || 0,
           prazo: String(produto.prazo ?? dadosCliente?.prazo_padrao ?? ''),
-          // produto fora do catálogo e sem categoria digitada conta como PÇS — o mesmo
-          // padrão que `categoriasDoPedido` usa quando nenhum produto tem categoria;
-          // sem isso o pedido sairia com histórico PÇS e nenhuma linha dentro.
-          categoria: String(produto.categoria ?? doCatalogo?.categoria ?? 'PÇS'),
+          // categoria vazia conta como ausente: cai na do catálogo e, sem ela, em PÇS — o mesmo
+          // padrão que `categoriasDoPedido` usa quando nenhum produto tem categoria; sem isso o
+          // pedido sairia com histórico PÇS e nenhuma linha dentro.
+          categoria:
+            String(produto.categoria ?? '').trim() ||
+            String(doCatalogo?.categoria ?? '').trim() ||
+            'PÇS',
         };
       });
       if (produtos.length === 0) throw erro400(`entrega ${indice + 1}: inclua ao menos um produto`);
@@ -400,11 +403,18 @@ router.get('/pedidos/pdf/:arquivo', (req, res) => {
   if (!NOME_PDF.test(nome) || path.basename(nome) !== nome) {
     return res.status(400).json({ error: 'nome de arquivo inválido' });
   }
-  const pastaLocal = path.join(ROOT, 'pedidos-pdf');
-  const caminho = path.join(pastaLocal, nome);
-  if (!fs.existsSync(caminho)) {
-    return res.status(404).json({ error: 'PDF não encontrado nesta máquina' });
-  }
-  res.set('Content-Type', 'application/pdf');
-  res.sendFile(caminho);
+  // `sendFile` com callback: arquivo apagado (ou pasta fora do ar) entre a checagem e a leitura
+  // cai no callback como ENOENT e vira o mesmo JSON de erro. Sem o callback o Express responde
+  // a página HTML dele, com stack e caminho absoluto.
+  res.sendFile(nome, { root: PDF_LOCAL_DIR }, (erro) => {
+    if (!erro) return;
+    if (res.headersSent) {
+      console.error('falha ao enviar o PDF do pedido (resposta já iniciada):', erro);
+      return;
+    }
+    if (erro.code === 'ENOENT' || erro.code === 'ENOTDIR') {
+      return res.status(404).json({ error: 'PDF não encontrado nesta máquina' });
+    }
+    responderErro(res, erro, 'não consegui ler o PDF do pedido');
+  });
 });
