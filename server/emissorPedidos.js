@@ -1,9 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { CLONES_DIR, DB_FILE } from './config.js';
-import { ler, responderSemBanco } from './emissorBanco.js';
+import { CLONES_DIR, DB_FILE, PDF_DIRS, ROOT } from './config.js';
+import { gravar, ler, responderSemBanco } from './emissorBanco.js';
 import { carteira } from './emissorCarteira.js';
+import { gerarPdf } from './emissorPdf.js';
+import {
+  categoriasDoPedido,
+  dataBr,
+  ehEsc,
+  linhasHistorico,
+  nomeArquivoPdf,
+  resumoPedido,
+} from './emissorRegras.js';
 
 export const router = express.Router();
 
@@ -134,4 +143,268 @@ router.get('/clones/:numero', (req, res) => {
   } catch (erro) {
     responderErro(res, erro, 'não consegui ler o clone do pedido');
   }
+});
+
+const ISO = /^\d{4}-\d{2}-\d{2}$/;
+const NOME_PDF = /^[^<>:"/\\|?*\u0000-\u001f]{1,180}\.pdf$/;
+
+const erro400 = (mensagem) => Object.assign(new Error(mensagem), { status: 400 });
+
+function siglaDaUnidade(unidade) {
+  return String(unidade ?? '').trim().split(/\s*-\s*/)[0].slice(0, 12) || 'SEM';
+}
+
+function pastasDoPdf() {
+  const pastas = PDF_DIRS.filter((dir) => fs.existsSync(dir));
+  const local = path.join(ROOT, 'pedidos-pdf');
+  if (!pastas.includes(local)) {
+    try {
+      fs.mkdirSync(local, { recursive: true });
+      pastas.push(local);
+    } catch {
+      // sem a pasta local: o PDF fica só onde a rede permitir
+    }
+  }
+  return pastas;
+}
+
+function gravarAtomico(caminho, conteudo) {
+  const temporario = `${caminho}.tmp`;
+  fs.writeFileSync(temporario, conteudo);
+  fs.renameSync(temporario, caminho);
+}
+
+router.post('/pedidos', async (req, res) => {
+  const avisos = [];
+  try {
+    const bruto = req.body ?? {};
+    const numero = String(bruto.numero ?? '').trim();
+    if (!/^\d{1,10}$/.test(numero)) throw erro400('informe o número do pedido (só dígitos)');
+    for (const [campo, chave] of [['emissão', 'dataEmissao'], ['embarque', 'dataEmbarque'], ['entrega', 'dataEntrega']]) {
+      if (!ISO.test(String(bruto[chave] ?? ''))) throw erro400(`data de ${campo} inválida`);
+    }
+    const entregasBrutas = Array.isArray(bruto.entregas) ? bruto.entregas : [];
+    if (entregasBrutas.length === 0) throw erro400('inclua pelo menos uma entrega');
+
+    const db = gravar();
+    const catalogo = new Map(
+      db
+        .prepare('SELECT codigo, descricao, unidade, peso, categoria FROM emissor_produtos')
+        .all()
+        .map((p) => [String(p.codigo), p]),
+    );
+    const clientesPorNome = new Map(
+      db
+        .prepare(
+          `SELECT nome_formatado AS nome, COALESCE(cnpj,'') AS cnpj, COALESCE(cidade,'') AS cidade,
+                  COALESCE(uf,'') AS uf, COALESCE(prazo_padrao,'') AS prazo_padrao
+             FROM emissor_clientes`,
+        )
+        .all()
+        .map((c) => [c.nome, c]),
+    );
+
+    const entregas = entregasBrutas.map((entrega, indice) => {
+      const cliente = String(entrega.cliente ?? '').trim();
+      if (!cliente) throw erro400(`entrega ${indice + 1}: informe o cliente`);
+      const destino = String(entrega.destino ?? '').trim();
+      const operacao = Number(entrega.operacao) === 9 ? 9 : 3;
+      const dadosCliente = clientesPorNome.get(cliente);
+      const esc = ehEsc(cliente) || ehEsc(destino);
+
+      if (esc) {
+        const pesoManual = Number(entrega.pesoManual);
+        if (!Number.isFinite(pesoManual) || pesoManual <= 0) {
+          throw erro400(`entrega ${indice + 1}: ESC exige peso manual maior que zero`);
+        }
+        return {
+          cliente,
+          operacao,
+          destino,
+          pesoManual,
+          peso: pesoManual,
+          prazo: dadosCliente?.prazo_padrao ?? '',
+          produtos: [],
+        };
+      }
+
+      const produtos = (Array.isArray(entrega.produtos) ? entrega.produtos : []).map((produto) => {
+        const codigo = String(produto.codigo ?? '').trim();
+        const doCatalogo = catalogo.get(codigo);
+        const qtd = Number(produto.qtd);
+        if (!codigo || !Number.isFinite(qtd) || qtd < 1) {
+          throw erro400(`entrega ${indice + 1}: produto com código ou quantidade inválida`);
+        }
+        return {
+          codigo,
+          descricao: String(produto.descricao ?? doCatalogo?.descricao ?? '').trim(),
+          qtd,
+          unidade: String(produto.unidade ?? doCatalogo?.unidade ?? 'kg'),
+          peso: Number(doCatalogo?.peso ?? produto.peso ?? 1) || 1,
+          preco: Number(produto.preco ?? 0) || 0,
+          prazo: String(produto.prazo ?? dadosCliente?.prazo_padrao ?? ''),
+          // produto fora do catálogo e sem categoria digitada conta como PÇS — o mesmo
+          // padrão que `categoriasDoPedido` usa quando nenhum produto tem categoria;
+          // sem isso o pedido sairia com histórico PÇS e nenhuma linha dentro.
+          categoria: String(produto.categoria ?? doCatalogo?.categoria ?? 'PÇS'),
+        };
+      });
+      if (produtos.length === 0) throw erro400(`entrega ${indice + 1}: inclua ao menos um produto`);
+
+      const peso = produtos.reduce((soma, p) => soma + p.qtd * p.peso, 0);
+      return {
+        cliente,
+        operacao,
+        destino,
+        pesoManual: null,
+        peso,
+        prazo: dadosCliente?.prazo_padrao ?? '',
+        produtos,
+      };
+    });
+
+    const resumo = resumoPedido({ entregas });
+    const sigla = siglaDaUnidade(bruto.unidade);
+    const pedidoPdf = {
+      numero,
+      sigla,
+      categorias: resumo.categorias,
+      atencao: String(bruto.atencao ?? ''),
+      local: String(bruto.local ?? ''),
+      unidade: String(bruto.unidade ?? ''),
+      observacao: String(bruto.observacao ?? ''),
+      dataEmissao: bruto.dataEmissao,
+      dataEmbarque: bruto.dataEmbarque,
+      dataEntrega: bruto.dataEntrega,
+      pesoTotal: resumo.pesoTotal,
+      veiculo: resumo.veiculo,
+      nfsRemessa: resumo.nfsRemessa,
+      entregas,
+    };
+
+    const buffer = await gerarPdf(pedidoPdf, { clientes: clientesPorNome });
+    const arquivo = nomeArquivoPdf({
+      numero,
+      categorias: resumo.categorias,
+      sigla,
+      dataEmbarque: bruto.dataEmbarque,
+    });
+
+    const salvoEm = [];
+    for (const pasta of pastasDoPdf()) {
+      try {
+        gravarAtomico(path.join(pasta, arquivo), buffer);
+        salvoEm.push(pasta);
+      } catch {
+        avisos.push(`não foi possível gravar em ${pasta}`);
+      }
+    }
+    if (salvoEm.length === 0) throw new Error('nenhuma pasta de PDF disponível');
+
+    const categoriasHistorico = categoriasDoPedido(entregas).filter(
+      (c) => c === 'PÇS' || c === 'CXS',
+    );
+    const agora = new Date().toISOString();
+    let registradoNoHistorico = false;
+    if (categoriasHistorico.length === 0) {
+      avisos.push('pedido sem PÇS nem CXS: PDF e clone gerados, histórico não registrado');
+    }
+
+    const payloadClone = {
+      numero,
+      atencao: pedidoPdf.atencao,
+      local: pedidoPdf.local,
+      unidade: pedidoPdf.unidade,
+      observacao: pedidoPdf.observacao,
+      data_pedido: dataBr(bruto.dataEmissao),
+      data_embarque: dataBr(bruto.dataEmbarque),
+      data_entrega: dataBr(bruto.dataEntrega),
+      entregas: entregas.map((e) => ({
+        cliente: e.cliente,
+        destino: e.destino,
+        operacao: e.operacao,
+        ...(e.pesoManual != null ? { peso_manual: e.pesoManual } : {}),
+        produtos: e.produtos.map((p) => ({
+          codigo: p.codigo,
+          descricao: p.descricao,
+          qtd: p.qtd,
+          unidade: p.unidade,
+          peso: p.peso,
+          preco: p.preco,
+          prazo: p.prazo,
+        })),
+      })),
+    };
+
+    // O número é ocupado numa única transação: histórico e clone entram juntos ou não
+    // entram. `BEGIN IMMEDIATE` pega o lock de escrita antes de qualquer INSERT, então
+    // duas máquinas digitando o mesmo número não se intercalam.
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      if (categoriasHistorico.length > 0) {
+        const inserir = db.prepare(
+          `INSERT OR REPLACE INTO emissor_pedidos_semana
+             (numero, categoria, sigla, data_embarque, data_entrega, criado_em, linhas)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        );
+        for (const categoria of categoriasHistorico) {
+          const linhas = JSON.stringify(linhasHistorico(entregas, clientesPorNome, categoria));
+          inserir.run(numero, categoria, sigla, bruto.dataEmbarque, bruto.dataEntrega, agora, linhas);
+        }
+        registradoNoHistorico = true;
+      }
+      db.prepare(
+        'INSERT OR REPLACE INTO emissor_pedidos_clonagem (numero, criado_em, payload) VALUES (?, ?, ?)',
+      ).run(numero, agora, JSON.stringify(payloadClone));
+      db.exec('COMMIT');
+    } catch (erro) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // transação já desfeita pelo SQLite: nada a fazer
+      }
+      throw erro;
+    }
+
+    try {
+      fs.mkdirSync(CLONES_DIR, { recursive: true });
+      gravarAtomico(path.join(CLONES_DIR, `${numero}.json`), JSON.stringify(payloadClone, null, 2));
+    } catch {
+      avisos.push(`não foi possível gravar o clone em ${CLONES_DIR}`);
+    }
+
+    res.json({
+      ok: true,
+      pedido: {
+        categorias: resumo.categorias,
+        pesoTotal: resumo.pesoTotal,
+        valor: resumo.valor,
+        veiculo: resumo.veiculo,
+        entregas: resumo.entregas,
+        nfsRemessa: resumo.nfsRemessa,
+        registradoNoHistorico,
+      },
+      arquivo,
+      salvoEm,
+      download: `/api/emissor/pedidos/pdf/${encodeURIComponent(arquivo)}`,
+      avisos,
+    });
+  } catch (erro) {
+    if (erro?.status === 400) return res.status(400).json({ error: erro.message });
+    responderErro(res, erro, 'não consegui gerar o pedido');
+  }
+});
+
+router.get('/pedidos/pdf/:arquivo', (req, res) => {
+  const nome = String(req.params.arquivo ?? '');
+  if (!NOME_PDF.test(nome) || path.basename(nome) !== nome) {
+    return res.status(400).json({ error: 'nome de arquivo inválido' });
+  }
+  const pastaLocal = path.join(ROOT, 'pedidos-pdf');
+  const caminho = path.join(pastaLocal, nome);
+  if (!fs.existsSync(caminho)) {
+    return res.status(404).json({ error: 'PDF não encontrado nesta máquina' });
+  }
+  res.set('Content-Type', 'application/pdf');
+  res.sendFile(caminho);
 });
