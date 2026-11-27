@@ -47,6 +47,8 @@ test('datas ISO', () => {
 
 test('busca de opções: código, nome, token numérico e trecho', () => {
   const opcoes = [
+    { valor: '4210', rotulo: 'Cliente Norte' },
+    { valor: '888', rotulo: 'Cliente MILHAR 11000X' },
     { valor: '4229791', rotulo: 'Operação 3: JL MEDEIROS LEVAMAIS MACAU (4229791)' },
     { valor: '100', rotulo: 'Cliente Água Boa' },
     { valor: '200', rotulo: 'Cliente São José' },
@@ -58,7 +60,7 @@ test('busca de opções: código, nome, token numérico e trecho', () => {
   assert.equal(localizarOpcao(opcoes, 'sao jose')?.valor, '200');
   assert.equal(localizarOpcao(opcoes, '4229791')?.valor, '4229791');
   assert.equal(localizarOpcao(opcoes, 'macau')?.valor, '4229791');
-  assert.equal(localizarOpcao(opcoes, '42')?.valor, '4229791'); // começa com o código
-  assert.equal(localizarOpcao(opcoes, '1000')?.valor, '999'); // token numérico dentro do rótulo
+  assert.equal(localizarOpcao(opcoes, '42')?.valor, '4210'); // começa com o código (o degrau de trecho acharia 4229791)
+  assert.equal(localizarOpcao(opcoes, '1000')?.valor, '999'); // token numérico dentro do rótulo (o trecho acharia 888, que contém 11000X)
   assert.equal(localizarOpcao(opcoes, 'inexistente'), null);
 });
