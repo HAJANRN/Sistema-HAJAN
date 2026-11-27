@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import zlib from 'node:zlib';
 import { PDFParse } from 'pdf-parse';
 import { gerarPdf } from '../server/emissorPdf.js';
 
@@ -40,6 +41,86 @@ function pedidoBase(extra: Pedido = {}): Pedido {
     ],
     ...extra,
   };
+}
+
+const PT = 72 / 25.4; // 1mm em pontos PostScript
+
+function corDe(hex: string) {
+  return [1, 3, 5].map((inicio) => parseInt(hex.slice(inicio, inicio + 2), 16) / 255);
+}
+
+const AZUL_RGB = corDe('#1F4E79');
+const FUNDO_RGB = corDe('#DDEBF7');
+
+const mesmaCor = (a: number[], b: number[]) =>
+  a.length === b.length && a.every((valor, indice) => Math.abs(valor - b[indice]) < 0.01);
+
+type Retangulo = {
+  tipo: 'retangulo';
+  x: number;
+  y: number;
+  largura: number;
+  altura: number;
+  cor: number[];
+};
+type TextoDesenhado = { tipo: 'texto'; cor: number[] };
+
+/**
+ * Operadores de desenho do content stream da 1ª página, na ordem em que saem, com a
+ * cor de preenchimento (`scn`) em vigor em cada retângulo/texto. Permite conferir a
+ * geometria da faixa da operação e se algum texto foi pintado com a cor do próprio
+ * fundo (o caso "texto no PDF mas invisível"). pdfkit comprime a página com FlateDecode.
+ */
+function operacoes(buffer: Buffer) {
+  const bruto = buffer.toString('latin1');
+  const marcador = /stream\r?\n/g;
+  let pagina: string | null = null;
+  let achado = marcador.exec(bruto);
+  while (achado && pagina === null) {
+    const inicio = achado.index + achado[0].length;
+    const fim = bruto.indexOf('endstream', inicio);
+    if (fim > inicio) {
+      try {
+        const conteudo = zlib.inflateSync(buffer.subarray(inicio, fim)).toString('latin1');
+        if (/(TJ|Tj)$/m.test(conteudo)) pagina = conteudo;
+      } catch {
+        // fonte/imagem comprimida: não é o conteúdo da página
+      }
+    }
+    achado = marcador.exec(bruto);
+  }
+  assert.ok(pagina, 'content stream da página 1 não encontrado');
+
+  const lista: Array<Retangulo | TextoDesenhado> = [];
+  let cor: number[] | null = null;
+  let caminho: { x: number; y: number; largura: number; altura: number } | null = null;
+
+  for (const linha of pagina.split('\n')) {
+    const tinta = linha.trim().match(/^([-\d.]+) ([-\d.]+) ([-\d.]+) scn$/);
+    if (tinta) {
+      cor = [Number(tinta[1]), Number(tinta[2]), Number(tinta[3])];
+      continue;
+    }
+    const area = linha.trim().match(/^([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) re$/);
+    if (area) {
+      caminho = {
+        x: Number(area[1]),
+        y: Number(area[2]),
+        largura: Number(area[3]),
+        altura: Number(area[4]),
+      };
+      continue;
+    }
+    if (/^(f\*?|S|s|B|b|n)$/.test(linha.trim())) {
+      if (linha.trim().startsWith('f') && caminho && cor) {
+        lista.push({ tipo: 'retangulo', ...caminho, cor });
+      }
+      caminho = null;
+      continue;
+    }
+    if (/(TJ|Tj)$/.test(linha.trim()) && cor) lista.push({ tipo: 'texto', cor });
+  }
+  return lista;
 }
 
 async function extrair(buffer: Buffer) {
@@ -101,6 +182,57 @@ test('gera PDF com cliente, produtos, totais do pedido e rodapé numerado', asyn
   assert.ok(text.includes('Página 1/1'), 'falta o rodapé Página 1/1');
   conferirRodapes({ total, pages });
   assert.doesNotMatch(text, /undefined|NaN/, 'campos ausentes viraram undefined/NaN');
+});
+
+test('faixa da operação tem 4mm, o cabeçalho fica abaixo dela e o rótulo é visível', async () => {
+  const buffer = await gerarPdf(pedidoBase(), {
+    clientes: new Map([[CLIENTE, { cnpj: '00.000.000/0001-00', cidade: 'Natal', uf: 'RN' }]]),
+  });
+  const lista = operacoes(buffer);
+
+  // fundo da faixa: retângulo #DDEBF7 com 4mm de altura
+  const faixa = lista.find((op) => op.tipo === 'retangulo' && mesmaCor(op.cor, FUNDO_RGB));
+  assert.ok(faixa?.tipo === 'retangulo', 'faixa da operação (#DDEBF7) não foi desenhada');
+  assert.ok(
+    Math.abs(faixa.altura - 4 * PT) < 0.05,
+    `faixa com ${(faixa.altura / PT).toFixed(2)}mm de altura, esperava 4mm`,
+  );
+  const topoDaFaixa = faixa.y + faixa.altura;
+
+  // cabeçalho da tabela (linha de 160mm com fundo #EDEDED) não invade a faixa
+  const cabecalho = lista.find(
+    (op) =>
+      op.tipo === 'retangulo' &&
+      Math.abs(op.largura - 160 * PT) < 0.05 &&
+      mesmaCor(op.cor, corDe('#EDEDED')),
+  );
+  assert.ok(cabecalho?.tipo === 'retangulo', 'cabeçalho da tabela não foi desenhado');
+  assert.ok(
+    cabecalho.y >= topoDaFaixa - 0.01,
+    `cabeçalho da tabela começa ${((topoDaFaixa - cabecalho.y) / PT).toFixed(2)}mm dentro da faixa`,
+  );
+
+  // o rótulo "Operação N" precisa sair no azul #1F4E79 sobre o fundo #DDEBF7
+  assert.ok(
+    lista.some((op) => op.tipo === 'texto' && mesmaCor(op.cor, AZUL_RGB)),
+    'rótulo da operação não foi desenhado em #1F4E79',
+  );
+
+  // nenhum texto herda a cor do retângulo preenchido imediatamente anterior
+  let ultimoPreenchimento: number[] | null = null;
+  for (const op of lista) {
+    if (op.tipo === 'retangulo') {
+      ultimoPreenchimento = op.cor;
+      continue;
+    }
+    if (ultimoPreenchimento) {
+      const tinta = op.cor.map((valor) => valor.toFixed(3)).join(',');
+      assert.ok(
+        !mesmaCor(op.cor, ultimoPreenchimento),
+        `texto pintado com a cor do fundo (${tinta}): invisível no PDF`,
+      );
+    }
+  }
 });
 
 test('entrega ESC sai com peso manual, sem produtos e como Operação 9', async () => {

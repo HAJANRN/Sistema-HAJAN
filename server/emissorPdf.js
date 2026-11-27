@@ -213,12 +213,17 @@ function desenhar(doc, pedido, contexto) {
           ? `Operação 3: ${item.destino}`
           : 'Operação 3';
     const faixa = doc.y;
-    doc.font('Helvetica').fontSize(7).fillColor(AZUL);
+    doc.font('Helvetica').fontSize(7);
     const larguraOperacao = doc.widthOfString(textoOperacao) + 1 * MM;
     doc.rect(MARGEM, faixa, larguraOperacao, 4 * MM).fill(AZUL_FUNDO);
-    doc.text(textoOperacao, MARGEM + 0.5 * MM, faixa + 0.8 * MM, { lineBreak: false });
+    // rect().fill() deixa o preenchimento em AZUL_FUNDO: sem repor o azul o rótulo
+    // sairia da cor do fundo (invisível na faixa).
+    doc.fillColor(AZUL).text(textoOperacao, MARGEM + 0.5 * MM, faixa + 0.8 * MM, { lineBreak: false });
     doc.fillColor('#000000');
 
+    // `text(..., { lineBreak: false })` não avança doc.y: a tabela começa abaixo da
+    // faixa inteira (4mm), e não nos 0,8mm em que o rótulo foi escrito.
+    doc.y = faixa + 4 * MM;
     cabecalhoTabela(doc);
 
     if (ehEsc(item.cliente) || ehEsc(item.destino)) {
