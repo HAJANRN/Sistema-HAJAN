@@ -1,7 +1,4 @@
-// Este módulo é carregado direto pelo `node --test`, que exige extensão no
-// specifier ESM; o tsconfig usa moduleResolution "bundler" e recusa ".ts".
-// @ts-ignore TS5097: extensão necessária para o runner de testes
-import { normalizarBusca } from './formato.ts';
+import { converterData, converterNumero, dataIso, normalizarBusca } from './formato.ts';
 import type {
   BaseEmissor,
   ClonePayload,
@@ -50,32 +47,36 @@ export type Acao =
 let sequencia = 0;
 const novoId = () => `id${++sequencia}`;
 
-const isoHoje = () => {
-  const d = new Date();
-  const dois = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${dois(d.getMonth() + 1)}-${dois(d.getDate())}`;
-};
+const isoHoje = () => dataIso(new Date());
 
+/** dd/mm/aaaa (também dd-mm-aaaa, dd.mm.aaaa) → ISO. Vazio ou inválida → ''. */
 const brParaIso = (texto: string): string => {
-  const achado = String(texto ?? '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
-  if (!achado) return '';
-  const ano = Number(achado[3]) < 100 ? Number(achado[3]) + 2000 : Number(achado[3]);
-  const dois = (n: number) => String(n).padStart(2, '0');
-  return `${ano}-${dois(Number(achado[2]))}-${dois(Number(achado[1]))}`;
+  const data = converterData(texto);
+  return data ? dataIso(data) : '';
 };
 
-const prazoDoCliente = (base: BaseEmissor, cliente: string, clienteBase?: string) => {
-  const nome = normalizarBusca(clienteBase || cliente);
+/** Valor numérico do payload; 0 é um valor legítimo, não cai no padrão. */
+const numeroOu = (valor: unknown, padrao: number): number => {
+  if (typeof valor === 'number') return Number.isFinite(valor) ? valor : padrao;
+  if (typeof valor === 'string') {
+    const numero = converterNumero(valor);
+    return numero === null ? padrao : numero;
+  }
+  return padrao;
+};
+
+const prazoDoCliente = (base: BaseEmissor, cliente: string) => {
+  const nome = normalizarBusca(cliente);
   const achado = base.clientes.find(
     (c) => normalizarBusca(c.nome) === nome || normalizarBusca(c.codigo) === nome,
   );
   return achado?.prazo || '';
 };
 
-function produtoVazio(base: BaseEmissor, prazo: string): ProdutoForm {
+function produtoVazio(base: BaseEmissor, prazo: string, id: string = novoId()): ProdutoForm {
   const primeiro = base.produtos[0];
   return {
-    id: novoId(),
+    id,
     codigo: primeiro?.codigo ?? '',
     descricao: primeiro?.descricao ?? '',
     qtd: 1,
@@ -87,15 +88,19 @@ function produtoVazio(base: BaseEmissor, prazo: string): ProdutoForm {
   };
 }
 
-function entregaVazia(base: BaseEmissor): EntregaForm {
+function entregaVazia(
+  base: BaseEmissor,
+  id: string = novoId(),
+  produtoId: string = novoId(),
+): EntregaForm {
   const cliente = base.clientes[0];
   return {
-    id: novoId(),
+    id,
     cliente: cliente?.nome ?? '',
     operacao: 3,
     destino: 'SEM DESTINO',
     pesoManual: null,
-    produtos: [produtoVazio(base, cliente?.prazo ?? '')],
+    produtos: [produtoVazio(base, cliente?.prazo ?? '', produtoId)],
   };
 }
 
@@ -104,17 +109,7 @@ function entregaVazia(base: BaseEmissor): EntregaForm {
  * devolvem os mesmos ids (o contador global só serve para itens criados depois).
  */
 function entregasIniciais(base: BaseEmissor): EntregaForm[] {
-  const entrega = entregaVazia(base);
-  return [
-    {
-      ...entrega,
-      id: 'inicio-entrega-1',
-      produtos: entrega.produtos.map((produto, indice) => ({
-        ...produto,
-        id: `inicio-produto-${indice + 1}`,
-      })),
-    },
-  ];
+  return [entregaVazia(base, 'inicio-entrega-1', 'inicio-produto-1')];
 }
 
 export function estadoInicial(base: BaseEmissor): Estado {
@@ -147,8 +142,14 @@ export function trocarOperacao(estado: Estado, id: string, operacao: 3 | 9): Est
 }
 
 export function aplicarClone(estadoAtual: Estado, payload: ClonePayload, base: BaseEmissor): Estado {
+  const buscaUnidade = normalizarBusca(payload.unidade);
   const unidade =
-    base.unidades.find((u) => normalizarBusca(u.rotulo) === normalizarBusca(payload.unidade))?.rotulo ??
+    base.unidades.find(
+      (u) =>
+        normalizarBusca(u.rotulo) === buscaUnidade ||
+        normalizarBusca(u.sigla) === buscaUnidade ||
+        normalizarBusca(u.nome) === buscaUnidade,
+    )?.rotulo ??
     payload.unidade;
   const hoje = isoHoje();
   const entregas: EntregaForm[] = (payload.entregas ?? []).map((entrega) => {
@@ -163,15 +164,21 @@ export function aplicarClone(estadoAtual: Estado, payload: ClonePayload, base: B
         id: novoId(),
         codigo: produto.codigo,
         descricao: produto.descricao,
-        qtd: Number(produto.qtd) || 0,
+        qtd: numeroOu(produto.qtd, 0),
         unidade: produto.unidade || 'kg',
-        peso: Number(produto.peso) || 1,
-        preco: Number(produto.preco) || 0,
+        peso: numeroOu(produto.peso, 1),
+        preco: numeroOu(produto.preco, 0),
         prazo: produto.prazo || prazo,
         categoria: base.produtos.find((p) => p.codigo === produto.codigo)?.categoria ?? '',
       })),
     };
   });
+  // Clone sem entregas mantém as atuais (contrato do brief) como cópia, sem
+  // compartilhar as referências do estado anterior.
+  const anteriores: EntregaForm[] = estadoAtual.entregas.map((entrega) => ({
+    ...entrega,
+    produtos: entrega.produtos.map((produto) => ({ ...produto })),
+  }));
   return {
     ...estadoAtual,
     dados: {
@@ -184,8 +191,25 @@ export function aplicarClone(estadoAtual: Estado, payload: ClonePayload, base: B
       dataEmbarque: brParaIso(payload.data_embarque) || hoje,
       dataEntrega: brParaIso(payload.data_entrega) || hoje,
     },
-    entregas: entregas.length > 0 ? entregas : estadoAtual.entregas,
+    entregas: entregas.length > 0 ? entregas : anteriores,
   };
+}
+
+/** Aplica um campo do formulário convertendo o valor para o tipo da coluna. */
+function produtoComCampo(
+  produto: ProdutoForm,
+  campo: keyof ProdutoForm,
+  valor: string | number,
+): ProdutoForm {
+  const copia: ProdutoForm = { ...produto };
+  if (campo === 'qtd' || campo === 'peso' || campo === 'preco') {
+    const numero = typeof valor === 'number' ? valor : converterNumero(valor);
+    if (numero === null || !Number.isFinite(numero)) return produto;
+    copia[campo] = numero;
+  } else {
+    copia[campo] = String(valor ?? '');
+  }
+  return copia;
 }
 
 const mover = <T,>(lista: T[], indice: number, direcao: -1 | 1): T[] => {
@@ -262,9 +286,7 @@ export function reduzir(estado: Estado, acao: Acao): Estado {
             ? {
                 ...e,
                 produtos: e.produtos.map((p) =>
-                  p.id === acao.produtoId
-                    ? ({ ...p, [acao.campo]: acao.valor } as ProdutoForm)
-                    : p,
+                  p.id === acao.produtoId ? produtoComCampo(p, acao.campo, acao.valor) : p,
                 ),
               }
             : e,
