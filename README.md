@@ -35,7 +35,7 @@ PDFs dos pedidos, dados de clonagem, carteira de crédito e média de compras fi
 | Onde | O quê |
 | --- | --- |
 | Storage `pedidos/pdf/` | PDFs gerados |
-| Storage `credito/carteira/` | Planilhas CARTEIRA DE TERCEIRO, enviadas em **Atualizar base local › Crédito no Firebase** |
+| Storage `credito/carteira/` | Planilhas CARTEIRA DE TERCEIRO, enviadas em **Importar dados › Crédito no Firebase** |
 | Storage `credito/decisao_credito.json` | Média de compras, enviada na mesma tela |
 | Firestore `pedidos_clonagem` | Um documento por pedido, para clonar pelo número |
 

@@ -3596,34 +3596,34 @@ if "_versao_upload_dados" not in st.session_state:
     st.session_state._versao_upload_dados = 0
 
 with st.expander(
-    "Atualizar base local",
+    "Importar dados",
     expanded="_resultado_atualizacao_dados" in st.session_state,
 ):
-    st.caption("Envie somente as planilhas alteradas. Cada arquivo atualiza sua tabela correspondente.")
+    st.caption("Envie somente os dados alterados. Cada arquivo atualiza sua tabela correspondente.")
     versao_upload = st.session_state._versao_upload_dados
     col_upload_clientes, col_upload_produtos = st.columns(2)
     with col_upload_clientes:
         arquivo_clientes = st.file_uploader(
-            "Planilha de clientes",
+            "Dados de clientes",
             type=["xlsx"],
             key=f"upload_clientes_{versao_upload}",
         )
     with col_upload_produtos:
         arquivo_produtos = st.file_uploader(
-            "Planilha de produtos",
+            "Dados de produtos",
             type=["xlsx"],
             key=f"upload_produtos_{versao_upload}",
         )
     col_upload_limites, col_upload_unidades = st.columns(2)
     with col_upload_limites:
         arquivo_limites = st.file_uploader(
-            "Planilha de limites",
+            "Dados de limites",
             type=["xlsx"],
             key=f"upload_limites_{versao_upload}",
         )
     with col_upload_unidades:
         arquivo_unidades = st.file_uploader(
-            "Planilha de unidades",
+            "Dados de unidades",
             type=["xlsx"],
             key=f"upload_unidades_{versao_upload}",
         )
