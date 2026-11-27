@@ -77,6 +77,19 @@ function nomeSeguro(texto) {
   return /^[A-Za-z0-9._-]{1,40}$/.test(nome) ? nome : null;
 }
 
+/**
+ * Banco fora do ar vira 503 amigável (`responderSemBanco`); qualquer outro erro fica no log
+ * e vira JSON genérico — a página HTML do Express mostraria stack e caminho absoluto.
+ */
+function responderErroClone(res, erro) {
+  try {
+    responderSemBanco(res, erro);
+  } catch {
+    console.error('não consegui ler o clone do pedido:', erro);
+    if (!res.headersSent) res.status(500).json({ error: 'não consegui ler o clone do pedido' });
+  }
+}
+
 router.get('/clones/:numero', (req, res) => {
   const numero = nomeSeguro(req.params.numero);
   if (!numero) return res.status(400).json({ error: 'número de pedido inválido' });
@@ -87,7 +100,14 @@ router.get('/clones/:numero', (req, res) => {
       .prepare('SELECT payload FROM emissor_pedidos_clonagem WHERE numero = ?')
       .get(numero);
     if (registro) {
-      return res.json({ encontrado: true, fonte: 'banco', payload: JSON.parse(registro.payload) });
+      try {
+        // mesmo regime tolerante da rede: payload corrompido no banco cai para o arquivo
+        // (legado `_carregar_clone_banco` devolve None e segue para `_carregar_clone_rede`)
+        const payload = JSON.parse(registro.payload);
+        return res.json({ encontrado: true, fonte: 'banco', payload });
+      } catch {
+        console.warn(`payload de clonagem inválido para o pedido nº ${numero}, tentando a rede`);
+      }
     }
 
     const arquivo = path.join(CLONES_DIR, `${numero}.json`);
@@ -113,6 +133,6 @@ router.get('/clones/:numero', (req, res) => {
     }
     res.json({ encontrado: false });
   } catch (erro) {
-    responderSemBanco(res, erro);
+    responderErroClone(res, erro);
   }
 });
