@@ -11,8 +11,25 @@ const AZUL = '#1F4E79';
 const AZUL_FUNDO = '#DDEBF7';
 const AMARELO = '#FFF200';
 
-const moeda = (valor) => Number(valor ?? 0).toFixed(2);
-const milhar = (valor) => Math.round(Number(valor ?? 0)).toLocaleString('pt-BR');
+const ALTURA_LINHA = 4 * MM;
+const RODAPE_Y = 282 * MM;
+// O conteúdo nunca desce até FIM_CONTEUDO: sobram ~12mm de folga antes do rodapé.
+const FIM_CONTEUDO = 270 * MM;
+// Espaço mínimo para abrir um bloco de entrega (título, cliente, CNPJ, faixa da
+// operação, cabeçalho da tabela, ao menos uma linha e o "Peso Total da Entrega").
+const ESPACO_ENTREGA = 34 * MM;
+// Espaço mínimo para o resumo do pedido + rótulo da observação.
+const ESPACO_TOTAIS = 30 * MM;
+// Espaço mínimo para "Observações Logísticas:" e as quatro linhas fixas.
+const ESPACO_OBSERVACOES = 22 * MM;
+
+const numero = (valor) => {
+  const achado = Number(valor);
+  return Number.isFinite(achado) ? achado : 0;
+};
+const texto = (valor) => (valor === null || valor === undefined ? '' : String(valor).trim());
+const moeda = (valor) => numero(valor).toFixed(2);
+const milhar = (valor) => Math.round(numero(valor)).toLocaleString('pt-BR');
 
 const COLUNAS = [
   { x: 0, largura: 80, align: 'left' },
@@ -23,7 +40,7 @@ const COLUNAS = [
 ];
 
 function linhaTabela(doc, y, valores, { negrito = false, fundo = null } = {}) {
-  const altura = 4 * MM;
+  const altura = ALTURA_LINHA;
   if (fundo) doc.rect(MARGEM, y, 160 * MM, altura).fill(fundo);
   doc.font(negrito ? 'Helvetica-Bold' : 'Helvetica').fontSize(7).fillColor('#000000');
   COLUNAS.forEach((coluna, indice) => {
@@ -42,23 +59,95 @@ function linhaTabela(doc, y, valores, { negrito = false, fundo = null } = {}) {
   doc.y = y + altura;
 }
 
+function cabecalhoTabela(doc) {
+  linhaTabela(doc, doc.y, ['Produto', 'Qtde.', 'Unid.', 'Preço', 'Prazo'], {
+    negrito: true,
+    fundo: '#EDEDED',
+  });
+}
+
+/** Nova página com o cabeçalho do pedido redesenhado (como o header() do FPDF). */
+function novaPagina(doc) {
+  doc.addPage(); // o handler 'pageAdded' redesenha o cabeçalho e posiciona doc.y
+  doc.y += 2 * MM;
+}
+
+/** Garante `altura` disponível; se não houver, abre página. Retorna true se quebrou. */
+function espacoPara(doc, altura) {
+  if (doc.y + altura <= FIM_CONTEUDO) return false;
+  novaPagina(doc);
+  return true;
+}
+
+/** Maior prefixo de `conteudo` que cabe em `altura`, cortado em limite de palavra. */
+function dividirTexto(doc, conteudo, width, altura) {
+  if (altura <= 0) return ['', conteudo];
+  let baixo = 0;
+  let alto = conteudo.length;
+  while (baixo < alto) {
+    const meio = Math.ceil((baixo + alto) / 2);
+    if (doc.heightOfString(conteudo.slice(0, meio), { width }) <= altura) baixo = meio;
+    else alto = meio - 1;
+  }
+  let corte = baixo;
+  while (corte > 0 && !/\s/.test(conteudo[corte] ?? ' ')) corte -= 1;
+  if (corte <= 0) corte = baixo;
+  if (corte <= 0) return ['', conteudo];
+  return [conteudo.slice(0, corte).replace(/\s+$/, ''), conteudo.slice(corte).replace(/^\s+/, '')];
+}
+
+/**
+ * Escreve um parágrafo longo quebrando em páginas com o mesmo espaçamento, em vez
+ * de deixar o auto page-break do pdfkit desenhar por cima do cabeçalho repetido.
+ */
+function escreverEmPaginas(doc, conteudo, { font = 'Helvetica', fontSize = 6.5, width = LARGURA_UTIL } = {}) {
+  let restante = String(conteudo ?? '').trim();
+  let paginas = 0;
+  while (restante) {
+    doc.font(font).fontSize(fontSize).fillColor('#000000');
+    // folga de uma linha para o heightOfString não encostar no limite
+    const [parte, resto] = dividirTexto(doc, restante, width, FIM_CONTEUDO - doc.y - fontSize);
+    if (!parte) {
+      if (paginas >= 40) {
+        doc.text(restante, MARGEM, doc.y, { width });
+        return;
+      }
+      novaPagina(doc);
+      paginas += 1;
+      continue;
+    }
+    doc.text(parte, MARGEM, doc.y, { width });
+    restante = resto;
+    if (restante) {
+      novaPagina(doc);
+      paginas += 1;
+    }
+  }
+}
+
 function cabecalho(doc, pedido) {
   const logo = path.join(ROOT, 'public', 'images', 'hajan-logo.png');
   const temLogo = fs.existsSync(logo);
   if (temLogo) doc.image(logo, MARGEM, 2 * MM, { width: 38 * MM });
   const y = temLogo ? 29 * MM : MARGEM;
 
-  const titulo = `Pedido HAJAN ${pedido.categorias} nº ${pedido.numero} - ${pedido.sigla} (FRIBOI)`;
+  // como o legado: nº e sigla só entram quando existem
+  const titulo = ['Pedido HAJAN'];
+  if (texto(pedido.categorias)) titulo.push(texto(pedido.categorias));
+  if (texto(pedido.numero)) titulo.push(`nº ${texto(pedido.numero)}`);
+  if (texto(pedido.sigla)) titulo.push(`- ${texto(pedido.sigla)}`);
+  titulo.push('(FRIBOI)');
   doc.font('Helvetica-Bold').fontSize(10).fillColor('#000000');
-  if (doc.widthOfString(titulo) > LARGURA_UTIL) doc.fontSize(8);
-  doc.text(titulo, MARGEM, y, { width: LARGURA_UTIL, align: 'center' });
+  if (doc.widthOfString(titulo.join(' ')) > LARGURA_UTIL) doc.fontSize(8);
+  doc.text(titulo.join(' '), MARGEM, y, { width: LARGURA_UTIL, align: 'center' });
 
-  doc.font('Helvetica').fontSize(8);
-  for (const linha of [
+  const linhas = [
     'Vendedor: 1677169-HAJAN COM. E REPRESENTAÇÕES',
     'Ao: Frigorifico Friboi (Grupo JBS)',
-    `Unidade de Carregamento: ${pedido.unidade}`,
-  ]) {
+  ];
+  if (texto(pedido.unidade)) linhas.push(`Unidade de Carregamento: ${texto(pedido.unidade)}`);
+  doc.font('Helvetica').fontSize(8);
+  for (const linha of linhas) {
     doc.text(linha, MARGEM, doc.y + 1, { width: LARGURA_UTIL });
   }
   return doc.y + 2 * MM;
@@ -66,42 +155,48 @@ function cabecalho(doc, pedido) {
 
 function desenhar(doc, pedido, contexto) {
   const clientes = contexto.clientes ?? new Map();
+  const entregas = pedido.entregas ?? [];
   const inicio = cabecalho(doc, pedido);
 
   doc.font('Helvetica').fontSize(8).fillColor('#000000');
+  const dataEmissao = dataBr(pedido.dataEmissao);
   doc.text(
-    `PEDIDO: ${pedido.numero} | At.: Sr. ${pedido.atencao} | ${pedido.local}, ${dataBr(pedido.dataEmissao)}`,
+    `PEDIDO: ${texto(pedido.numero)} | At.: Sr. ${texto(pedido.atencao)} | ${texto(pedido.local)}${
+      dataEmissao ? `, ${dataEmissao}` : ''
+    }`,
     MARGEM,
     inicio,
     { width: LARGURA_UTIL },
   );
-  doc.text(
-    `CIF  -  EMBARQUE: ${dataBrCurta(pedido.dataEmbarque)} - ENTREGA: ${dataBrCurta(pedido.dataEntrega)}`,
-    { width: LARGURA_UTIL },
-  );
+  const embarque = dataBrCurta(pedido.dataEmbarque);
+  const entrega = dataBrCurta(pedido.dataEntrega);
+  // como o legado: a linha CIF só existe quando as duas datas existem
+  if (embarque && entrega) {
+    doc.text(`CIF  -  EMBARQUE: ${embarque} - ENTREGA: ${entrega}`, { width: LARGURA_UTIL });
+  }
   doc.y += 3 * MM;
 
-  pedido.entregas.forEach((entrega, indice) => {
-    if (doc.y > 230 * MM) doc.addPage();
-    const dados = clientes.get(entrega.cliente) ?? {};
+  entregas.forEach((item, indice) => {
+    espacoPara(doc, ESPACO_ENTREGA);
+    const dados = clientes.get(item.cliente) ?? {};
     doc
       .font('Helvetica-Bold')
       .fontSize(8)
       .fillColor('#000000')
-      .text(`PEDIDO: ${pedido.numero} - ${indice + 1}ª entrega`, MARGEM, doc.y + 4);
-    doc.font('Helvetica').fontSize(8).text(`Cliente: ${entrega.cliente}`, MARGEM, doc.y + 1);
+      .text(`PEDIDO: ${texto(pedido.numero)} - ${indice + 1}ª entrega`, MARGEM, doc.y + 4);
+    doc.font('Helvetica').fontSize(8).text(`Cliente: ${texto(item.cliente)}`, MARGEM, doc.y + 1);
 
-    const cnpj = String(dados.cnpj ?? '');
-    const localizacao = [dados.cidade, dados.uf].filter(Boolean).join(' - ');
+    const cnpj = texto(dados.cnpj);
+    const localizacao = [texto(dados.cidade), texto(dados.uf)].filter(Boolean).join(' - ');
     if (cnpj || localizacao) {
       const base = doc.y + 1;
       let x = MARGEM;
       if (cnpj) {
         doc.font('Helvetica-Bold').fontSize(8);
-        const texto = `CNPJ: ${cnpj}`;
-        const largura = doc.widthOfString(texto) + 1 * MM;
+        const conteudoCnpj = `CNPJ: ${cnpj}`;
+        const largura = doc.widthOfString(conteudoCnpj) + 1 * MM;
         doc.rect(MARGEM, base, largura, 4 * MM).fill(AMARELO);
-        doc.fillColor('#000000').text(texto, MARGEM + 0.5 * MM, base + 0.7 * MM, { lineBreak: false });
+        doc.fillColor('#000000').text(conteudoCnpj, MARGEM + 0.5 * MM, base + 0.7 * MM, { lineBreak: false });
         x = MARGEM + largura;
       }
       if (localizacao) {
@@ -112,10 +207,10 @@ function desenhar(doc, pedido, contexto) {
     }
 
     const textoOperacao =
-      entrega.operacao === 9
+      Number(item.operacao) === 9
         ? 'Operação 9'
-        : entrega.destino
-          ? `Operação 3: ${entrega.destino}`
+        : item.destino
+          ? `Operação 3: ${item.destino}`
           : 'Operação 3';
     const faixa = doc.y;
     doc.font('Helvetica').fontSize(7).fillColor(AZUL);
@@ -124,56 +219,54 @@ function desenhar(doc, pedido, contexto) {
     doc.text(textoOperacao, MARGEM + 0.5 * MM, faixa + 0.8 * MM, { lineBreak: false });
     doc.fillColor('#000000');
 
-    linhaTabela(doc, faixa + 4 * MM, ['Produto', 'Qtde.', 'Unid.', 'Preço', 'Prazo'], {
-      negrito: true,
-      fundo: '#EDEDED',
-    });
+    cabecalhoTabela(doc);
 
-    if (ehEsc(entrega.cliente) || ehEsc(entrega.destino)) {
+    if (ehEsc(item.cliente) || ehEsc(item.destino)) {
       linhaTabela(doc, doc.y, [
         'PESO',
-        milhar(entrega.pesoManual ?? 0),
+        milhar(item.pesoManual),
         'KG',
         '0,00',
-        entrega.prazo ?? '',
+        texto(item.prazo),
       ]);
     } else {
-      for (const produto of entrega.produtos ?? []) {
+      for (const produto of item.produtos ?? []) {
+        if (espacoPara(doc, ALTURA_LINHA)) cabecalhoTabela(doc);
         linhaTabela(doc, doc.y, [
-          produto.descricao,
+          texto(produto.descricao),
           milhar(produto.qtd),
-          produto.unidade,
+          texto(produto.unidade),
           moeda(produto.preco),
-          produto.prazo,
+          texto(produto.prazo),
         ]);
       }
     }
 
+    // o total da entrega também precisa caber; se não couber, continua na página nova
+    if (espacoPara(doc, 5 * MM)) cabecalhoTabela(doc);
     doc
       .font('Helvetica-Bold')
       .fontSize(8)
-      .text(`Peso Total da Entrega: ${milhar(entrega.peso)} kg`, MARGEM, doc.y + 1, {
+      .text(`Peso Total da Entrega: ${milhar(item.peso)} kg`, MARGEM, doc.y + 1, {
         width: LARGURA_UTIL,
       });
     doc.y += 3 * MM;
   });
 
-  if (doc.y > 210 * MM) doc.addPage();
+  espacoPara(doc, ESPACO_TOTAIS);
   doc
     .font('Helvetica-Bold')
     .fontSize(8)
     .text(`Peso Carga (Total - Kg): ${milhar(pedido.pesoTotal)}`, MARGEM, doc.y + 4);
   doc.font('Helvetica').fontSize(8);
-  doc.text(`Veículo: ${pedido.veiculo}`);
-  doc.text(`Quantidade de Entregas (NFs): ${pedido.entregas.length}`);
-  doc.text(`Quantidade NFs de Remessa: ${pedido.nfsRemessa}`);
+  doc.text(`Veículo: ${texto(pedido.veiculo)}`);
+  doc.text(`Quantidade de Entregas (NFs): ${entregas.length}`);
+  doc.text(`Quantidade NFs de Remessa: ${milhar(pedido.nfsRemessa)}`);
   doc.moveDown(0.4);
   doc.font('Helvetica-Bold').fontSize(6).text('OBSERVAÇÃO:', MARGEM, doc.y + 2);
-  doc
-    .font('Helvetica')
-    .fontSize(6.5)
-    .text(pedido.observacao?.trim() || 'Sem observações.', { width: LARGURA_UTIL });
+  escreverEmPaginas(doc, pedido.observacao?.trim() || 'Sem observações.');
   doc.moveDown(0.4);
+  espacoPara(doc, ESPACO_OBSERVACOES);
   doc.font('Helvetica-Bold').fontSize(8).text('Observações Logísticas:', MARGEM, doc.y + 2);
   doc.font('Helvetica').fontSize(7).text(
     '1. Anexar na NF Boletos Bancários e Romaneio c/ o peso Peça por Peça.\n' +
@@ -190,7 +283,7 @@ export function gerarPdf(pedido, contexto = {}) {
       size: 'A4',
       margins: { top: MARGEM, left: MARGEM, right: MARGEM, bottom: MARGEM },
       bufferPages: true,
-      info: { Title: `Pedido ${pedido.numero}` },
+      info: { Title: `Pedido ${texto(pedido.numero)}` },
     });
     const partes = [];
     doc.on('data', (parte) => partes.push(parte));
@@ -208,7 +301,7 @@ export function gerarPdf(pedido, contexto = {}) {
         .font('Helvetica-Oblique')
         .fontSize(8)
         .fillColor('#000000')
-        .text(`Página ${pagina + 1}/${total}`, MARGEM, 282 * MM, {
+        .text(`Página ${pagina + 1}/${total}`, MARGEM, RODAPE_Y, {
           width: LARGURA_UTIL,
           align: 'center',
           lineBreak: false,
