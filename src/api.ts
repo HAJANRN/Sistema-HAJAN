@@ -79,11 +79,14 @@ export interface EmissaoResultado {
   avisos: string[];
 }
 
+/** Planilhas que a importação aceita — cada uma é uma tabela da base. */
+export type TipoImportacao = 'clientes' | 'produtos' | 'limites' | 'unidades';
+
 export interface ImportacaoResultado {
   backup: string;
-  contagens: { clientes: number; produtos: number; limites: number; unidades: number };
+  contagens: Record<TipoImportacao, number>;
   /** Linhas descartadas por falta de código/nome/descrição/sigla (campo aditivo do servidor). */
-  ignoradas: { clientes: number; produtos: number; limites: number; unidades: number };
+  ignoradas: Record<TipoImportacao, number>;
 }
 
 /**
@@ -228,7 +231,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(corpo),
     }),
-  importarPlanilhas: (arquivos: Partial<Record<'clientes' | 'produtos' | 'limites' | 'unidades', File>>) => {
+  importarPlanilhas: (arquivos: Partial<Record<TipoImportacao, File>>) => {
     const form = new FormData();
     for (const [tipo, arquivo] of Object.entries(arquivos)) {
       if (arquivo) form.append(tipo, arquivo);

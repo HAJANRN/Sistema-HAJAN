@@ -1,22 +1,37 @@
 import { useState } from 'react';
-import { api, type ImportacaoResultado } from '../api';
+import { api, type ImportacaoResultado, type TipoImportacao } from '../api';
 
-type Tipo = 'clientes' | 'produtos' | 'limites' | 'unidades';
-
-const ROTULOS: Record<Tipo, string> = {
+const ROTULOS: Record<TipoImportacao, string> = {
   clientes: 'Clientes — aba Infos Clientes',
   produtos: 'Produtos — aba Infos Produtos',
   limites: 'Limites — 1ª aba',
   unidades: 'Unidades — aba SiglasUnidades',
 };
 
+/** Singular e plural de cada tabela, para as contagens não saírem como "1 clientes". */
+const NOMES: Record<TipoImportacao, [string, string]> = {
+  clientes: ['cliente', 'clientes'],
+  produtos: ['produto', 'produtos'],
+  limites: ['limite', 'limites'],
+  unidades: ['unidade', 'unidades'],
+};
+
+const TIPOS = Object.keys(ROTULOS) as TipoImportacao[];
+
+const comNome = (tipo: TipoImportacao, total: number) => `${total} ${NOMES[tipo][total === 1 ? 0 : 1]}`;
+
+/** Tipos com alguma linha, na ordem das planilhas; evita poluir o painel com zeros. */
+const comLinhas = (totais: Record<TipoImportacao, number>) => TIPOS.filter((tipo) => totais[tipo] > 0);
+
 export function ImportarPlanilhasScreen() {
-  const [arquivos, setArquivos] = useState<Partial<Record<Tipo, File>>>({});
+  const [arquivos, setArquivos] = useState<Partial<Record<TipoImportacao, File>>>({});
+  // muda a cada importação concluída: remonta os <input type=file> e apaga os nomes exibidos
+  const [versao, setVersao] = useState(0);
   const [busy, setBusy] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
   const [resultado, setResultado] = useState<ImportacaoResultado | null>(null);
 
-  const escolher = (tipo: Tipo, arquivo: File | undefined) => {
+  const escolher = (tipo: TipoImportacao, arquivo: File | undefined) => {
     setArquivos((atual) => {
       const proximo = { ...atual };
       if (arquivo) proximo[tipo] = arquivo;
@@ -27,22 +42,34 @@ export function ImportarPlanilhasScreen() {
 
   const enviar = async () => {
     if (busy) return;
-    if (Object.keys(arquivos).length === 0) {
+    const escolhidos = TIPOS.filter((tipo) => arquivos[tipo]);
+    if (escolhidos.length === 0) {
       setErro('escolha pelo menos uma planilha');
       return;
     }
+    const tabelas = escolhidos.map((tipo) => NOMES[tipo][1]).join(', ');
+    const confirmado = window.confirm(
+      `A importação substitui as tabelas de ${tabelas}: as linhas atuais desses tipos serão apagadas e ` +
+        'trocadas pelas das planilhas escolhidas. O servidor cria um backup automático do banco antes de ' +
+        'gravar. Continuar?',
+    );
+    if (!confirmado) return;
     setBusy(true);
     setErro(null);
     setResultado(null);
     try {
       setResultado(await api.importarPlanilhas(arquivos));
       setArquivos({});
+      setVersao((atual) => atual + 1);
     } catch (cause) {
       setErro(cause instanceof Error ? cause.message : 'não consegui importar');
     } finally {
       setBusy(false);
     }
   };
+
+  const importados = resultado ? comLinhas(resultado.contagens) : [];
+  const ignorados = resultado ? comLinhas(resultado.ignoradas) : [];
 
   return (
     <section className="emissor-screen">
@@ -55,17 +82,19 @@ export function ImportarPlanilhasScreen() {
 
       <section className="card">
         <p className="hint">
-          A importação substitui a base do tipo enviado. Antes de gravar, o servidor cria um backup em{' '}
-          <code>data/backups</code> e mantém os 10 mais recentes. Se qualquer planilha estiver inválida, nada
-          é alterado.
+          A importação substitui as tabelas da base pelos dados das planilhas enviadas. Antes de gravar, o
+          servidor cria um backup automático do banco na pasta de backups configurada e mantém os 10 mais
+          recentes. Se qualquer planilha estiver inválida, nada é alterado.
         </p>
         <div className="emissor-grade">
-          {(Object.keys(ROTULOS) as Tipo[]).map((tipo) => (
+          {TIPOS.map((tipo) => (
             <label key={tipo}>
               <span>{ROTULOS[tipo]}</span>
               <input
+                key={`${tipo}-${versao}`}
                 type="file"
                 accept=".xlsx"
+                disabled={busy}
                 onChange={(event) => escolher(tipo, event.target.files?.[0])}
               />
             </label>
@@ -76,16 +105,24 @@ export function ImportarPlanilhasScreen() {
             {busy ? 'Importando…' : 'Importar'}
           </button>
         </div>
-        {erro && <p className="alert">{erro}</p>}
+        {erro && (
+          <p className="alert" role="alert">
+            {erro}
+          </p>
+        )}
         {resultado && (
-          <div className="emissor-resultado">
+          <div className="emissor-resultado" aria-live="polite">
             <p>
-              Importado:{' '}
-              {Object.entries(resultado.contagens)
-                .filter(([, total]) => total > 0)
-                .map(([tipo, total]) => `${total} ${tipo}`)
-                .join(' · ')}
+              {importados.length > 0
+                ? `Importado: ${importados.map((tipo) => comNome(tipo, resultado.contagens[tipo])).join(' · ')}`
+                : 'Nenhuma linha importada.'}
             </p>
+            {ignorados.length > 0 && (
+              <p className="emissor-ignoradas">
+                Linhas ignoradas (sem código, nome, descrição ou sigla):{' '}
+                {ignorados.map((tipo) => comNome(tipo, resultado.ignoradas[tipo])).join(' · ')}
+              </p>
+            )}
             <p className="hint">
               Backup: <code>{resultado.backup}</code>
             </p>
