@@ -50,6 +50,7 @@ test('busca de opções: código, nome, token numérico e trecho', () => {
     { valor: '4229791', rotulo: 'Operação 3: JL MEDEIROS LEVAMAIS MACAU (4229791)' },
     { valor: '100', rotulo: 'Cliente Água Boa' },
     { valor: '200', rotulo: 'Cliente São José' },
+    { valor: '999', rotulo: 'Cliente União (1000)' },
   ];
   assert.equal(normalizarBusca('ÁGUA'), 'agua');
   assert.equal(localizarOpcao(opcoes, '100')?.valor, '100');
@@ -57,5 +58,7 @@ test('busca de opções: código, nome, token numérico e trecho', () => {
   assert.equal(localizarOpcao(opcoes, 'sao jose')?.valor, '200');
   assert.equal(localizarOpcao(opcoes, '4229791')?.valor, '4229791');
   assert.equal(localizarOpcao(opcoes, 'macau')?.valor, '4229791');
+  assert.equal(localizarOpcao(opcoes, '42')?.valor, '4229791'); // começa com o código
+  assert.equal(localizarOpcao(opcoes, '1000')?.valor, '999'); // token numérico dentro do rótulo
   assert.equal(localizarOpcao(opcoes, 'inexistente'), null);
 });
