@@ -2,12 +2,13 @@ import { api } from './api';
 import { db } from './db';
 import {
   FINAL_STATUSES,
-  type Delivery,
   type DeliveryPatch,
   type DeliveryStatus,
   type Order,
+  type OrderPatch,
   type OutboxEntry,
   type Papel,
+  isEscDelivery,
 } from './types';
 import { shiftISO, todayISO } from './utils';
 
@@ -18,11 +19,13 @@ export interface SyncState {
   lastError: string | null;
   pending: number;
   pendingFiles: number;
+  upload: { id: number; percent: number } | null;
   role: Papel;
   senhaDefinida: boolean;
 }
 
-const RANGE_BACK_DAYS = 45;
+/** O painel "Tudo" mostra o histórico importado: a janela precisa cobrir os pedidos antigos. */
+const RANGE_BACK_DAYS = 400;
 const RANGE_FORWARD_DAYS = 90;
 const POLL_MS = 30_000;
 /** Limite do lado do navegador; o servidor confirma o dele em /api/status. */
@@ -35,9 +38,15 @@ let state: SyncState = {
   lastError: null,
   pending: 0,
   pendingFiles: 0,
+  upload: null,
   role: 'operacao',
   senhaDefinida: false,
 };
+
+/** Última versão do conteúdo que este navegador já tem, para não baixar a lista inteira à toa. */
+let syncedRevision = 0;
+let syncedRange = '';
+let metaLoaded = false;
 
 const listeners = new Set<() => void>();
 
@@ -58,15 +67,35 @@ const errorMessage = (error: unknown) =>
 
 async function overlayPending() {
   const entries = await db.outbox.toArray();
+  if (!entries.length) return;
+  const byOrder = new Map<string, OutboxEntry[]>();
   for (const entry of entries) {
-    const order = await db.orders.get(entry.orderId);
+    if (!byOrder.has(entry.orderId)) byOrder.set(entry.orderId, []);
+    byOrder.get(entry.orderId)!.push(entry);
+  }
+  for (const [orderId, list] of byOrder) {
+    const order = await db.orders.get(orderId);
     if (!order) continue;
+    const pedido = list.find((entry) => entry.kind === 'pedido');
+    const bySeq = new Map(
+      list.filter((entry) => entry.kind !== 'pedido').map((entry) => [entry.seq, entry]),
+    );
     await db.orders.put({
       ...order,
+      ...(pedido
+        ? {
+            plates: pedido.plates !== undefined ? pedido.plates : order.plates,
+            branchInstruction:
+              pedido.branchInstruction !== undefined
+                ? pedido.branchInstruction
+                : order.branchInstruction,
+          }
+        : {}),
       pendingSync: true,
-      deliveries: order.deliveries.map((d) =>
-        d.seq === entry.seq ? { ...d, ...deliveryPatch(entry) } : d,
-      ),
+      deliveries: order.deliveries.map((delivery) => {
+        const entry = bySeq.get(delivery.seq);
+        return entry ? { ...delivery, ...deliveryPatch(entry) } : delivery;
+      }),
     });
   }
 }
@@ -75,50 +104,75 @@ const deliveryPatch = (entry: OutboxEntry): DeliveryPatch => {
   const patch: DeliveryPatch = {};
   if (entry.status !== undefined) patch.status = entry.status;
   if (entry.note !== undefined) patch.note = entry.note;
+  if (entry.observation !== undefined) patch.observation = entry.observation;
   if (entry.scheduledAt !== undefined) patch.scheduledAt = entry.scheduledAt;
   if (entry.reason !== undefined) patch.reason = entry.reason;
   if (entry.resale !== undefined) patch.resale = entry.resale;
   if (entry.resaleDate !== undefined) patch.resaleDate = entry.resaleDate;
+  if (entry.lombador !== undefined) patch.lombador = entry.lombador;
   return patch;
 };
 
 /** Importação, ajustes e servidor pedem a senha do escritório; marcar entregas não pede. */
 export const administrador = () => state.role === 'administracao';
 
-let flushing = false;
+interface FlushResult {
+  ok: boolean;
+  changed: Set<string>;
+  error: string | null;
+}
 
-async function flushOutbox(): Promise<boolean> {
-  if (flushing) return true;
-  flushing = true;
-  try {
-    const entries = await db.outbox.orderBy('id').toArray();
-    for (const entry of entries) {
-      try {
+let flushing: Promise<FlushResult> | null = null;
+
+/** Chamadas simultâneas esperam a mesma gravação em vez de fingir que já terminou. */
+function flushOutbox(): Promise<FlushResult> {
+  if (!flushing) {
+    flushing = runFlush().finally(() => {
+      flushing = null;
+    });
+  }
+  return flushing;
+}
+
+async function runFlush(): Promise<FlushResult> {
+  const changed = new Set<string>();
+  const entries = await db.outbox.orderBy('id').toArray();
+  for (const entry of entries) {
+    let sent = false;
+    try {
+      if (entry.kind === 'pedido') {
+        await api.patchOrder(entry.orderId, {
+          ...(entry.plates !== undefined ? { plates: entry.plates } : {}),
+          ...(entry.branchInstruction !== undefined
+            ? { branchInstruction: entry.branchInstruction }
+            : {}),
+        });
+      } else {
         await api.setDeliveryStatus(entry.orderId, entry.seq, deliveryPatch(entry));
-      } catch (error) {
-        const message = errorMessage(error);
-        const permanent = message.includes('(404)') || message.includes('não encontrada');
-        if (!permanent) {
-          emit({
-            online: false,
-            lastError: message,
-            pending: await db.outbox.count(),
-          });
-          return false;
-        }
       }
-      await db.outbox.delete(entry.id!);
-      const remaining = await db.outbox.where('orderId').equals(entry.orderId).count();
-      if (remaining === 0) {
-        const order = await db.orders.get(entry.orderId);
-        if (order?.pendingSync) await db.orders.put({ ...order, pendingSync: false });
+      sent = true;
+    } catch (error) {
+      const message = errorMessage(error);
+      const permanent = message.includes('(404)') || /não encontrad[ao]/i.test(message);
+      if (!permanent) {
+        emit({
+          online: false,
+          lastError: message,
+          pending: await db.outbox.count(),
+        });
+        return { ok: false, changed, error: message };
       }
     }
-    emit({ pending: await db.outbox.count() });
-    return true;
-  } finally {
-    flushing = false;
+    if (sent) changed.add(entry.orderId);
+    await db.outbox.delete(entry.id!);
+    const remaining = await db.outbox.where('orderId').equals(entry.orderId).count();
+    if (remaining === 0) {
+      const order = await db.orders.get(entry.orderId);
+      if (order?.pendingSync) await db.orders.put({ ...order, pendingSync: false });
+    }
   }
+  emit({ pending: await db.outbox.count() });
+  return { ok: true, changed, error: null };
 }
 
 /** Guarda o arquivo no navegador e devolve o erro de tamanho, quando houver. */
@@ -150,31 +204,57 @@ export async function removeQueuedFile(id: number) {
   emit({ pendingFiles: await db.files.count() });
 }
 
-let flushingFiles = false;
+/** Exclui um anexo já enviado (no S: ou na fila do servidor) e atualiza o pedido local. */
+export async function deleteAnomalyFile(orderId: string, attachmentId: string) {
+  await api.deleteAttachment(attachmentId);
+  await refreshOrder(orderId);
+}
+
+/** Força a gravação da anomalia na pasta da semana e regenera o resumo em PDF. */
+export async function saveAnomalyToFolder(orderId: string, seq: number) {
+  const result = await api.saveAnomaly(orderId, seq);
+  await refreshOrder(orderId);
+  return result;
+}
+
+let flushingFiles: Promise<string[]> | null = null;
 
 /** Tenta enviar tudo o que ainda está no navegador; devolve os pedidos afetados. */
-async function flushFiles(): Promise<string[]> {
-  if (flushingFiles) return [];
-  flushingFiles = true;
+function flushFiles(): Promise<string[]> {
+  if (!flushingFiles) {
+    flushingFiles = runFlushFiles().finally(() => {
+      flushingFiles = null;
+    });
+  }
+  return flushingFiles;
+}
+
+async function runFlushFiles(): Promise<string[]> {
   const sent: string[] = [];
   try {
     for (const job of await db.files.orderBy('queuedAt').toArray()) {
+      // erro permanente (arquivo vazio, grande demais, 4xx) fica parado até a pessoa cancelar
+      if (job.error) continue;
       if (typeof navigator !== 'undefined' && !navigator.onLine) break;
+      const jobId = job.id!;
+      emit({ upload: { id: jobId, percent: 0 } });
       try {
-        await api.uploadAttachment(job);
-        await db.files.delete(job.id!);
+        await api.uploadAttachment(job, (percent) => emit({ upload: { id: jobId, percent } }));
+        await db.files.delete(jobId);
         sent.push(job.orderId);
       } catch (error) {
         const message = errorMessage(error);
         const unreachable =
           error instanceof TypeError || /falha no envio \((5\d\d)\)/.test(message);
         if (unreachable) break;
-        await db.files.update(job.id!, { error: message });
+        await db.files.update(jobId, { error: message });
+      } finally {
+        emit({ upload: null });
       }
     }
+    for (const orderId of new Set(sent)) await refreshOrder(orderId);
     return sent;
   } finally {
-    flushingFiles = false;
     emit({ pendingFiles: await db.files.count() });
   }
 }
@@ -182,6 +262,15 @@ async function flushFiles(): Promise<string[]> {
 export async function syncNow() {
   if (state.syncing) return;
   emit({ syncing: true });
+  if (!metaLoaded) {
+    const [revision, range] = await Promise.all([
+      db.meta.get('syncedRevision'),
+      db.meta.get('syncedRange'),
+    ]);
+    syncedRevision = Number(revision?.value) || 0;
+    syncedRange = range?.value ?? '';
+    metaLoaded = true;
+  }
   const today = todayISO();
   const from = shiftISO(today, -RANGE_BACK_DAYS);
   const to = shiftISO(today, RANGE_FORWARD_DAYS);
@@ -192,25 +281,39 @@ export async function syncNow() {
     if (role !== state.role || senhaDefinida !== state.senhaDefinida) emit({ role, senhaDefinida });
 
     const flushed = await flushOutbox();
-    if (!flushed) throw new Error(state.lastError ?? 'servidor indisponível');
+    if (!flushed.ok) throw new Error(flushed.error ?? state.lastError ?? 'servidor indisponível');
 
     const sentFiles = await flushFiles();
     if (sentFiles.length)
       await Promise.all([...new Set(sentFiles)].map((orderId) => refreshOrder(orderId)));
 
-    const { orders } = await api.orders(from, to);
-    const remoteIds = new Set(orders.map((order) => order.id));
+    const range = `${from}|${to}`;
+    const payload = await api.orders(
+      from,
+      to,
+      syncedRange === range && syncedRevision > 0 ? syncedRevision : undefined,
+    );
 
-    await db.transaction('rw', db.orders, async () => {
-      const local = await db.orders
-        .where('deliveryDate')
-        .between(from, to, true, true)
-        .primaryKeys();
-      const stale = local.filter((id) => !remoteIds.has(id));
-      if (stale.length) await db.orders.bulkDelete(stale);
-      await db.orders.bulkPut(orders);
-    });
+    if (!payload.unchanged) {
+      const orders = payload.orders ?? [];
+      const remoteIds = new Set(orders.map((order) => order.id));
+      await db.transaction('rw', db.orders, async () => {
+        const local = await db.orders
+          .where('deliveryDate')
+          .between(from, to, true, true)
+          .primaryKeys();
+        const stale = local.filter((id) => !remoteIds.has(id));
+        if (stale.length) await db.orders.bulkDelete(stale);
+        await db.orders.bulkPut(orders);
+      });
+    }
     await overlayPending();
+    syncedRevision = payload.revision;
+    syncedRange = range;
+    await db.meta.bulkPut([
+      { key: 'syncedRevision', value: String(syncedRevision) },
+      { key: 'syncedRange', value: syncedRange },
+    ]);
 
     const at = new Date().toISOString();
     await db.meta.put({ key: 'lastSyncAt', value: at });
@@ -231,28 +334,36 @@ export async function syncNow() {
   }
 }
 
+/** Junta a alteração com o que já estava na fila daquela entrega (ex.: observação + status). */
+async function queueEntries(orderId: string, entries: OutboxEntry[]) {
+  if (!entries.length) return;
+  const existing = await db.outbox.where('orderId').equals(orderId).toArray();
+  const bySeq = new Map(existing.map((entry) => [entry.seq, entry]));
+  for (const entry of entries) {
+    const prior = bySeq.get(entry.seq);
+    if (prior) await db.outbox.put({ ...prior, ...entry, id: prior.id });
+    else await db.outbox.add(entry);
+  }
+}
+
 export async function patchDelivery(order: Order, seq: number, patch: DeliveryPatch) {
   const at = new Date().toISOString();
-  const deliveries = order.deliveries.map((d) => {
+  const base = (await db.orders.get(order.id)) ?? order;
+  const deliveries = base.deliveries.map((d) => {
     if (d.seq !== seq) return d;
-    const merged: Delivery = {
-      ...d,
-      ...patch,
-      statusAt: patch.status ? at : d.statusAt,
-    };
-    if (patch.status && patch.status !== 'recusada') {
-      merged.reason = patch.reason ?? null;
-      merged.resale = patch.resale ?? null;
-      merged.resaleDate = patch.resaleDate ?? null;
-      merged.note = patch.note ?? null;
-    }
-    return merged;
+    return { ...d, ...patch, statusAt: patch.status ? at : d.statusAt };
   });
 
+  const origemEsc = isEscDelivery(
+    base,
+    base.deliveries.find((d) => d.seq === seq)?.name,
+  );
   const advanced =
-    patch.status && FINAL_STATUSES.includes(patch.status)
+    patch.status && FINAL_STATUSES.includes(patch.status) && !origemEsc
       ? (deliveries
-          .filter((d) => d.seq > seq && d.status === 'pendente')
+          .filter(
+            (d) => d.seq > seq && d.status === 'pendente' && !isEscDelivery(base, d.name),
+          )
           .sort((a, b) => a.seq - b.seq)[0]?.seq ?? null)
       : null;
   if (advanced != null) {
@@ -264,35 +375,47 @@ export async function patchDelivery(order: Order, seq: number, patch: DeliveryPa
     };
   }
 
-  await db.orders.put({ ...order, pendingSync: true, deliveries });
+  await db.orders.put({ ...base, pendingSync: true, deliveries });
 
-  const entries: OutboxEntry[] = [{ orderId: order.id, seq, ...patch, queuedAt: at }];
+  const entries: OutboxEntry[] = [{ orderId: base.id, seq, ...patch, queuedAt: at }];
   if (advanced != null)
     entries.push({
-      orderId: order.id,
+      orderId: base.id,
       seq: advanced,
       status: 'em_rota',
       queuedAt: at,
     });
-  for (const entry of entries) {
-    await db.outbox.filter((e) => e.orderId === order.id && e.seq === entry.seq).delete();
-    await db.outbox.add(entry);
-  }
+  await queueEntries(base.id, entries);
 
   emit({ pending: await db.outbox.count() });
-  const flushed = await flushOutbox();
-  if (flushed) await refreshOrder(order.id);
+  const result = await flushOutbox();
+  if (result.ok) await refreshOrder(base.id);
 }
 
 async function refreshOrder(orderId: string) {
   if (await db.outbox.where('orderId').equals(orderId).count()) return;
   try {
     const fresh = await api.order(orderId);
+    // chegou alteração enquanto buscava: a fila local manda
+    if (await db.outbox.where('orderId').equals(orderId).count()) return;
     const local = await db.orders.get(orderId);
     await db.orders.put({ ...fresh, pendingSync: local?.pendingSync ?? false });
   } catch {
     // a próxima sincronização traz as previsões recalculadas
   }
+}
+
+/** Placas e instrução filial: mesma fila das entregas, com seq 0 para separar do status. */
+export async function patchOrderFields(order: Order, patch: OrderPatch) {
+  const at = new Date().toISOString();
+  const base = (await db.orders.get(order.id)) ?? order;
+  await db.orders.put({ ...base, ...patch, pendingSync: true });
+  await queueEntries(base.id, [
+    { orderId: base.id, seq: 0, kind: 'pedido', ...patch, queuedAt: at },
+  ]);
+  emit({ pending: await db.outbox.count() });
+  const result = await flushOutbox();
+  if (result.ok) await refreshOrder(base.id);
 }
 
 export async function setDeliveryStatus(order: Order, seq: number, status: DeliveryStatus) {
@@ -301,27 +424,28 @@ export async function setDeliveryStatus(order: Order, seq: number, status: Deliv
 
 export async function setAllDeliveries(order: Order, status: DeliveryStatus) {
   const at = new Date().toISOString();
+  const base = (await db.orders.get(order.id)) ?? order;
   await db.orders.put({
-    ...order,
+    ...base,
     pendingSync: true,
-    deliveries: order.deliveries.map((d) => ({ ...d, status, statusAt: at })),
+    deliveries: base.deliveries.map((d) =>
+      isEscDelivery(base, d.name) ? d : { ...d, status, statusAt: at },
+    ),
   });
-  await db.outbox.filter((entry) => entry.orderId === order.id).delete();
-  for (const delivery of order.deliveries) {
-    await db.outbox.add({
-      orderId: order.id,
-      seq: delivery.seq,
-      status,
-      queuedAt: at,
-    });
-  }
+  await queueEntries(
+    base.id,
+    base.deliveries
+      .filter((delivery) => !isEscDelivery(base, delivery.name))
+      .map((delivery) => ({ orderId: base.id, seq: delivery.seq, status, queuedAt: at })),
+  );
   emit({ pending: await db.outbox.count() });
-  await flushOutbox();
+  const result = await flushOutbox();
+  if (result.ok) await refreshOrder(base.id);
 }
 
 /** Entra na área administrativa; o servidor é quem decide se a senha valeu. */
-export async function entrar(senha: string) {
-  const { role } = await api.entrar(senha);
+export async function entrar(senha: string, usuario = 'admin') {
+  const { role } = await api.entrar(usuario, senha);
   await db.meta.put({ key: 'role', value: role });
   emit({ role, senhaDefinida: true });
 }
@@ -332,8 +456,8 @@ export async function sair() {
   emit({ role });
 }
 
-export async function trocarSenha(senha: string) {
-  const { role } = await api.salvarSenha(senha);
+export async function trocarSenha(senha: string, usuario = 'admin') {
+  const { role } = await api.salvarSenha(senha, usuario);
   await db.meta.put({ key: 'role', value: role });
   emit({ role, senhaDefinida: true });
 }

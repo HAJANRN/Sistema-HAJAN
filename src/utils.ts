@@ -2,8 +2,17 @@ const kgFormatter = new Intl.NumberFormat('pt-BR', {
   maximumFractionDigits: 0,
 });
 
+const moneyFormatter = new Intl.NumberFormat('pt-BR', {
+  style: 'currency',
+  currency: 'BRL',
+  maximumFractionDigits: 2,
+});
+
 export const fmtKg = (value: number | null | undefined) =>
   value == null ? '—' : `${kgFormatter.format(value)} kg`;
+
+export const fmtMoney = (value: number | null | undefined) =>
+  value == null ? '—' : moneyFormatter.format(value);
 
 export const todayISO = () => localISO(new Date());
 

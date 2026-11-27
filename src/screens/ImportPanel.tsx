@@ -62,7 +62,9 @@ function SenhaPanel({ onClose }: Props) {
 
         <form className="login-form" onSubmit={enviar}>
           <label>
-            <span>{sync.senhaDefinida ? 'Senha do escritório' : 'Crie a senha (mínimo 4 caracteres)'}</span>
+            <span>
+              {sync.senhaDefinida ? 'Senha do escritório' : 'Crie a senha (mínimo 4 caracteres)'}
+            </span>
             <input
               type="password"
               value={senha}
@@ -144,7 +146,8 @@ function Painel({ onClose }: Props) {
   const waitForScan = useCallback(async () => {
     const next = await load();
     if (next?.scanning) {
-      timer.current = window.setTimeout(() => void waitForScan(), 2000);
+      if (timer.current) window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => void waitForScan(), 2500);
     } else {
       setBusy(false);
       await syncNow();
@@ -153,6 +156,7 @@ function Painel({ onClose }: Props) {
 
   const rescan = async (force: boolean) => {
     setBusy(true);
+    if (timer.current) window.clearTimeout(timer.current);
     try {
       await api.rescan(force);
       timer.current = window.setTimeout(() => void waitForScan(), 1500);
@@ -315,12 +319,43 @@ function Painel({ onClose }: Props) {
                   </span>
                 </li>
               ))}
+              {(status.billing?.dirs ?? []).map((dir) => (
+                <li key={dir.dir}>
+                  <span className={`dir-state ${dir.exists ? 'ok' : 'missing'}`}>
+                    {dir.exists ? 'ok' : 'off'}
+                  </span>
+                  <code title={dir.dir}>{dir.dir}</code>
+                  <span className="dir-count">
+                    {dir.exists
+                      ? `${dir.files} ${dir.files === 1 ? 'arquivo' : 'arquivos'}`
+                      : 'não encontrada'}
+                  </span>
+                </li>
+              ))}
             </ul>
             <p className="hint">
               Os pedidos são gravados pelo escritório nas pastas da rede. Não altere os arquivos por
               aqui: o app só lê. Para importar os pesos, salve o PDF do pedido em{' '}
               <code>pedidos-pdf</code>.
             </p>
+            {status.billing && (
+              <p className="hint billing-hint">
+                Faturamento do ERP:{' '}
+                {status.billing.lastSync.files} arquivo
+                {status.billing.lastSync.files === 1 ? '' : 's'} lido
+                {status.billing.lastSync.files === 1 ? '' : 's'} ·{' '}
+                {status.billing.lastSync.orders} pedido
+                {status.billing.lastSync.orders === 1 ? '' : 's'} com nota
+                {status.billing.lastSync.unmatchedRows > 0
+                  ? ` · ${status.billing.lastSync.unmatchedRows} linha${status.billing.lastSync.unmatchedRows === 1 ? '' : 's'} ainda sem pedido`
+                  : ''}
+                {status.billing.lastSyncAt
+                  ? ` · última leitura ${relativeTime(status.billing.lastSyncAt)}`
+                  : ''}
+                {status.billing.syncing ? ' · lendo agora…' : ''}. O faturamento é só informativo e
+                não muda o status das entregas.
+              </p>
+            )}
 
             {etaForm && (
               <>
@@ -358,12 +393,13 @@ function Painel({ onClose }: Props) {
                   </button>
                 </div>
                 <p className="hint">
-                  A previsão parte às 06:00 do 1º cliente na data ENTREGA e usa a distância
+                  A previsão parte às 08:00 do 1º cliente na data ENTREGA e usa a distância
                   rodoviária real entre as cidades ({status.road} trechos calculados; sem resposta
-                  da rota, estima linha reta × 1,25). Chegadas fora do horário de recebimento
-                  (segunda a sexta, 06:00–18:00) passam para a próxima janela. Na caixaria, a data
-                  do agendamento ancora a previsão daquela entrega e das seguintes (clientes ESC não
-                  são agendados). Ao marcar entregue ou anomalia, a próxima entrega pendente passa
+                  da rota, estima linha reta × 1,25). Chegadas fora da janela de recebimento
+                  (08:00–18:00) passam para o dia seguinte às 08:00, sem pular sábado ou domingo: a
+                  data ENTREGA é a data da primeira entrega. Na caixaria, a data do agendamento
+                  ancora a previsão daquela entrega e das seguintes (clientes ESC não são
+                  agendados). Ao marcar entregue ou recusado, a próxima entrega pendente passa
                   automaticamente para Em rota.
                 </p>
               </>
@@ -397,6 +433,20 @@ function Painel({ onClose }: Props) {
               </>
             )}
 
+            {(status.billing?.errors.length ?? 0) > 0 && (
+              <>
+                <h3 className="section-title">Faturamento com problema</h3>
+                <ul className="issue-list">
+                  {status.billing!.errors.map((item) => (
+                    <li key={`${item.file}-${item.at}`}>
+                      <span title={item.file}>{item.file.split('\\').pop()}</span>
+                      <small>{item.error}</small>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+
             <h3 className="section-title">Senha e servidor</h3>
             <div className="eta-form">
               <label>
@@ -418,11 +468,7 @@ function Painel({ onClose }: Props) {
               </button>
             </div>
             <div className="admin-actions">
-              <button
-                type="button"
-                className="btn ghost"
-                onClick={() => void sair().then(onClose)}
-              >
+              <button type="button" className="btn ghost" onClick={() => void sair().then(onClose)}>
                 Sair da área restrita
               </button>
               <button

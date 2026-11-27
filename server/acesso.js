@@ -5,6 +5,7 @@ import {
   ADMIN_HORAS,
   SENHA_AMBIENTE,
   SENHA_ARQUIVO,
+  USUARIO_AMBIENTE,
   VISITA_DIAS,
   VISITA_TOKEN,
 } from './config.js';
@@ -47,14 +48,19 @@ function temCookieValido(req, nome, prefixo) {
 
 /** Confere o token do link sem vazar tempo de resposta proporcional ao acerto. */
 export const tokenOk = (candidato) => iguais(candidato, VISITA_TOKEN);
+export const usuarioOk = (candidato) => iguais(candidato, USUARIO_AMBIENTE);
+
+let hashCache = null;
 
 const hashGuardado = () => {
+  if (hashCache !== null) return hashCache;
   try {
     const texto = fs.readFileSync(SENHA_ARQUIVO, 'utf8').trim();
-    return texto.startsWith('scrypt$') ? texto : '';
+    hashCache = texto.startsWith('scrypt$') ? texto : '';
   } catch {
-    return '';
+    hashCache = '';
   }
+  return hashCache;
 };
 
 export const senhaDefinida = () => Boolean(hashGuardado() || SENHA_AMBIENTE);
@@ -71,6 +77,12 @@ export function conferirSenha(candidata) {
   return false;
 }
 
+export function conferirCredenciais(usuario, senha) {
+  const usuarioValido = usuarioOk(usuario);
+  const senhaValida = conferirSenha(senha);
+  return usuarioValido && senhaValida;
+}
+
 export function definirSenha(nova) {
   const texto = String(nova ?? '');
   if (texto.length < 4) throw new Error('a senha precisa ter pelo menos 4 caracteres');
@@ -78,9 +90,11 @@ export function definirSenha(nova) {
   const hash = scryptSync(texto, Buffer.from(salt, 'hex'), 64).toString('hex');
   fs.mkdirSync(path.dirname(SENHA_ARQUIVO), { recursive: true });
   fs.writeFileSync(SENHA_ARQUIVO, `scrypt$${salt}$${hash}\n`);
+  hashCache = `scrypt$${salt}$${hash}`;
 }
 
-const noTunel = (endereco) => /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(String(endereco ?? ''));
+const noTunel = (endereco) =>
+  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(String(endereco ?? ''));
 
 /**
  * Quem chega pelo túnel precisa do cookie do link; sem ele o acesso é negado (link expirado não
@@ -116,7 +130,16 @@ export function bloqueado(ip) {
   return registro.faltas >= MAX_FALTAS;
 }
 
+function podar() {
+  if (tentativas.size < 500) return;
+  const agora = Date.now();
+  for (const [ip, registro] of tentativas) {
+    if (agora - registro.janela > JANELA_MS) tentativas.delete(ip);
+  }
+}
+
 export function registrarFalta(ip) {
+  podar();
   const registro = tentativas.get(ip) ?? { faltas: 0, janela: Date.now() };
   if (Date.now() - registro.janela > JANELA_MS) {
     registro.faltas = 0;

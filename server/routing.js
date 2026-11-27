@@ -1,5 +1,5 @@
 import { cityKey, haversine, resolve } from './estimates.js';
-import { getDistance, listOrders, setDistance } from './store.js';
+import { deliveryLegs, getDistance, setDistance, touchRevision } from './store.js';
 
 const ROUTE_API = (process.env.ROUTE_API ?? 'https://router.project-osrm.org').replace(/\/+$/, '');
 const REQUEST_TIMEOUT_MS = 8000;
@@ -36,8 +36,12 @@ export async function fillMissingDistances() {
   let failed = 0;
   try {
     const pending = new Map();
-    for (const order of listOrders()) {
-      const list = [...order.deliveries].sort((a, b) => a.seq - b.seq);
+    const byOrder = new Map();
+    for (const row of deliveryLegs()) {
+      if (!byOrder.has(row.order_id)) byOrder.set(row.order_id, []);
+      byOrder.get(row.order_id).push(row);
+    }
+    for (const list of byOrder.values()) {
       let prev = null;
       for (const delivery of list) {
         const place = resolve(delivery.city, delivery.uf);
@@ -69,6 +73,7 @@ export async function fillMissingDistances() {
       await new Promise((resolveGap) => setTimeout(resolveGap, REQUEST_GAP_MS));
     }
     const remaining = pending.size - queue.length;
+    if (fetched > 0) touchRevision();
     console.log(
       `Distâncias rodoviárias: ${fetched} calculadas, ${failed} sem resposta` +
         (remaining > 0 ? `, ${remaining} ficaram para a próxima leitura` : ''),

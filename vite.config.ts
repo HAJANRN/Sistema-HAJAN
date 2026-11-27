@@ -19,12 +19,12 @@ export default defineConfig({
         ],
       },
       manifest: {
-        name: 'Expedição de Carne',
-        short_name: 'Expedição',
-        description: 'Acompanhamento de entregas dos pedidos HAJAN · Friboi',
+        name: 'Sistemas HAJAN · Friboi',
+        short_name: 'Sistemas HAJAN',
+        description: 'Acompanhamento de entregas e emissão de pedidos HAJAN · Friboi',
         lang: 'pt-BR',
-        theme_color: '#006cb5',
-        background_color: '#efeae2',
+        theme_color: '#0d211a',
+        background_color: '#ebeeea',
         display: 'standalone',
         icons: [
           {

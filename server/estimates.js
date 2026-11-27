@@ -6,12 +6,13 @@ import { getDistance, getEtaSettings } from './store.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const COORDS_FILE = path.join(here, 'data', 'municipios.json');
 
-const START_HOUR = 6;
+const START_HOUR = 8;
 const END_HOUR = 18;
 const ROAD_FACTOR = 1.25;
 
 let coords = null;
 const byName = new Map();
+const resolved = new Map();
 
 const norm = (value) =>
   String(value ?? '')
@@ -45,9 +46,16 @@ export function resolve(city, uf) {
   const state = String(uf ?? '')
     .trim()
     .toUpperCase();
-  if (state && coords[`${name}|${state}`]) return { point: coords[`${name}|${state}`], uf: state };
-  const matches = byName.get(name);
-  return matches?.length === 1 ? matches[0] : null;
+  const cacheKey = `${name}|${state}`;
+  if (resolved.has(cacheKey)) return resolved.get(cacheKey);
+  let found = null;
+  if (state && coords[`${name}|${state}`]) found = { point: coords[`${name}|${state}`], uf: state };
+  else {
+    const matches = byName.get(name);
+    found = matches?.length === 1 ? matches[0] : null;
+  }
+  resolved.set(cacheKey, found);
+  return found;
 }
 
 const EARTH_KM = 6371;
@@ -73,30 +81,25 @@ const startOfDay = (date) => {
   return next;
 };
 
-const isWeekend = (date) => date.getDay() === 0 || date.getDay() === 6;
-
-function nextWorkdayStart(date) {
-  const next = startOfDay(date);
-  while (isWeekend(next)) next.setDate(next.getDate() + 1);
-  return next;
-}
-
+/**
+ * A data do pedido é a data real da primeira entrega, inclusive sábado ou domingo:
+ * o relógio só anda para frente (fim de 18:00 vira 08:00 do dia seguinte), nunca pula dias.
+ */
 function clampToWindow(date) {
-  if (isWeekend(date)) return nextWorkdayStart(date);
   const hour = date.getHours() + date.getMinutes() / 60;
   if (hour > END_HOUR) {
     const next = startOfDay(date);
     next.setDate(next.getDate() + 1);
-    return nextWorkdayStart(next);
+    return next;
   }
   if (hour < START_HOUR) return startOfDay(date);
   return date;
 }
 
-export function estimateDeliveries(order) {
+export function estimateDeliveries(order, settings = getEtaSettings()) {
   const list = [...order.deliveries].sort((a, b) => a.seq - b.seq);
   if (!order.deliveryDate) return list.map((delivery) => ({ seq: delivery.seq, eta: null }));
-  const { speedKmh, stopMinutes } = getEtaSettings();
+  const { speedKmh, stopMinutes } = settings;
   const stopHours = stopMinutes / 60;
   let clock = clampToWindow(new Date(`${order.deliveryDate}T${pad(START_HOUR)}:00:00`));
   let previous = null;
@@ -133,9 +136,9 @@ export function estimateDeliveries(order) {
   });
 }
 
-export function withEstimates(order) {
+export function withEstimates(order, settings = getEtaSettings()) {
   if (!order) return order;
-  const rows = new Map(estimateDeliveries(order).map((item) => [item.seq, item]));
+  const rows = new Map(estimateDeliveries(order, settings).map((item) => [item.seq, item]));
   return {
     ...order,
     deliveries: order.deliveries.map((delivery) => {

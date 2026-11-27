@@ -1,7 +1,13 @@
 node_modules
 dist
 *.local
-data
-pedidos-pdf
+/data
+/pedidos-pdf
 .scratch
 *.log
+.tmp-*
+*.db
+*.db-shm
+*.db-wal
+*.backup-*
+.superpowers

@@ -6,8 +6,11 @@ import PDFDocument from 'pdfkit';
 import { ANEXO_ROOT, SPOOL_DIR } from './config.js';
 import {
   addAttachment,
+  attachmentsOnNetwork,
+  deleteAttachmentRow,
+  deleteAttachmentRows,
   getAttachment,
-  getOrder,
+  getDeliveryForPath,
   pendingAttachments,
   setAttachmentLocation,
   summaryAttachment,
@@ -44,6 +47,8 @@ const normalize = (value) =>
     .trim();
 
 /** Tira o que o Windows não aceita em nome de arquivo ou de pasta. */
+const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
 function cleanName(value, max) {
   const cleaned = String(value ?? '')
     .replace(ILLEGAL, ' ')
@@ -51,7 +56,8 @@ function cleanName(value, max) {
     .trim()
     .replace(/^\.+|\.+$/g, '')
     .slice(0, max);
-  return cleaned || 'arquivo';
+  if (!cleaned) return 'arquivo';
+  return RESERVED_NAME.test(cleaned) ? `_${cleaned}` : cleaned;
 }
 
 /** Nome vindo do navegador: guarda só o nome do arquivo, sem caminho e sem caracteres proibidos. */
@@ -80,11 +86,13 @@ const isDirectory = (dir) => {
   }
 };
 
-/** Data que decide a semana do arquivo: agendamento, entrega, embarque ou a data do registro. */
+/**
+ * Data que decide a semana do arquivo: agendamento, entrega, embarque ou a data do registro.
+ * Não usa statusAt: a semana da pasta não pode mudar quando a entrega vira recusada.
+ */
 function referenceDate(order, delivery) {
   return (
     delivery.scheduledAt ??
-    delivery.statusAt?.slice(0, 10) ??
     order.deliveryDate ??
     order.shipDate ??
     new Date().toISOString().slice(0, 10)
@@ -92,7 +100,10 @@ function referenceDate(order, delivery) {
 }
 
 function typeLabel(order) {
-  return order.type === 'PCS' ? 'PÇS' : 'CXS';
+  if (order.type === 'PCS') return 'PÇS';
+  if (order.type === 'CHQ') return 'CHQ';
+  if (order.type === 'SPG') return 'SPG';
+  return 'CXS';
 }
 
 function deliveryFolderName(order, delivery) {
@@ -150,6 +161,15 @@ function targetDir(order, delivery) {
   return { dir: resolveDeliveryDir(weekDir, order, delivery), week };
 }
 
+/** Pasta da semana onde a anomalia fica arquivada, ou null quando o S: está fora do ar. */
+export function folderFor(order, delivery) {
+  try {
+    return targetDir(order, delivery).dir;
+  } catch {
+    return null;
+  }
+}
+
 /** Nunca sobrescreve: se o nome já existe, acrescenta (2), (3)… */
 function uniqueIn(dir, fileName, ownPath) {
   if (ownPath && path.dirname(ownPath) === dir && fs.existsSync(ownPath)) return ownPath;
@@ -186,7 +206,10 @@ export function storedPath(attachment) {
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const MAX_EMBED_BYTES = 12 * 1024 * 1024;
+const MAX_EMBED_TOTAL = 24 * 1024 * 1024;
 const MAX_EMBED_PIXELS = 24_000_000;
+const MAX_INFLATED_BYTES = 96 * 1024 * 1024;
+const embedCache = new Map();
 
 /**
  * pdfkit desenha PNG num callback assíncrono do zlib: um IDAT corrompido ou um
@@ -215,7 +238,7 @@ function isPng(buffer) {
   }
   if (!idat.length) return false;
   try {
-    zlib.inflateSync(Buffer.concat(idat));
+    zlib.inflateSync(Buffer.concat(idat), { maxOutputLength: MAX_INFLATED_BYTES });
     return true;
   } catch {
     return false;
@@ -230,15 +253,28 @@ function isJpeg(buffer) {
 function embeddableImage(item) {
   const file = storedPath(item);
   if (!file || !/image\/(jpeg|png)/i.test(item.mime ?? '')) return null;
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    return null;
+  }
+  if (!stat.size || stat.size > MAX_EMBED_BYTES) return null;
+
+  const stamp = `${stat.size}:${Math.floor(stat.mtimeMs)}`;
+  const cached = embedCache.get(file);
+  if (cached?.stamp === stamp) return cached.ok ? { path: file, bytes: stat.size } : null;
+
   let buffer;
   try {
     buffer = fs.readFileSync(file);
   } catch {
     return null;
   }
-  if (!buffer.length || buffer.length > MAX_EMBED_BYTES) return null;
   const ok = PNG_SIGNATURE.equals(buffer.subarray(0, 8)) ? isPng(buffer) : isJpeg(buffer);
-  return ok ? file : null;
+  if (embedCache.size > 200) embedCache.clear();
+  embedCache.set(file, { stamp, ok });
+  return ok ? { path: file, bytes: buffer.length } : null;
 }
 
 export function storeAttachment({ order, seq, delivery, name, mime, buffer }) {
@@ -308,25 +344,60 @@ function drawPhotos(doc, photos) {
     }
   }
 }
+const summaryQueue = new Map();
+
 /** Monta o PDF de resumo da anomalia e devolve o registro (no S: ou na fila). */
 export function writeSummary(order, delivery, attachments = []) {
+  // duas alterações seguidas na mesma entrega gerariam dois PDFs ao mesmo tempo no mesmo nome
+  const key = `${order.id}:${delivery.seq}`;
+  const previous = summaryQueue.get(key) ?? Promise.resolve();
+  const run = previous.catch(() => {}).then(() => buildSummary(order, delivery, attachments));
+  summaryQueue.set(key, run);
+  const forget = () => {
+    if (summaryQueue.get(key) === run) summaryQueue.delete(key);
+  };
+  run.then(forget, forget);
+  return run;
+}
+
+function buildSummary(order, delivery, attachments) {
   const files = attachments.filter((item) => item.kind === 'arquivo');
-  const photos = files
-    .map((item) => ({ name: item.name, path: embeddableImage(item) }))
-    .filter((item) => item.path)
-    .slice(0, 10);
+  const photos = [];
+  let totalBytes = 0;
+  for (const item of files) {
+    if (photos.length >= 10) break;
+    const photo = embeddableImage(item);
+    if (!photo) continue;
+    if (totalBytes + photo.bytes > MAX_EMBED_TOTAL) break;
+    totalBytes += photo.bytes;
+    photos.push({ name: item.name, path: photo.path });
+  }
+
+  let folder = null;
+  try {
+    folder = targetDir(order, delivery).dir;
+  } catch {
+    // pasta de relatórios fora do ar: o PDF nasce na fila local e ganha o caminho quando for enviado
+  }
 
   const doc = new PDFDocument({
     size: 'A4',
     margin: 42,
     info: { Title: `Anomalia pedido ${order.number}` },
   });
-  const chunks = [];
-  doc.on('data', (chunk) => chunks.push(chunk));
-  const done = new Promise((resolve) => doc.on('end', resolve));
+  // o PDF vai direto para o disco: não precisa segurar o arquivo inteiro na memória
+  fs.mkdirSync(SPOOL_DIR, { recursive: true });
+  const temp = path.join(SPOOL_DIR, `resumo-${randomUUID()}.pdf`);
+  const output = fs.createWriteStream(temp);
+  const done = new Promise((resolve, reject) => {
+    output.on('finish', resolve);
+    output.on('error', reject);
+    doc.on('error', reject);
+  });
+  doc.pipe(output);
 
   doc.fontSize(16).fillColor('#000000').text('Registro de anomalia', { continued: true });
-  doc.fontSize(10).fillColor('#666666').text('  HAJAN · Expedição de carne');
+  doc.fontSize(10).fillColor('#666666').text('  HAJAN · Acompanhamento de entregas');
   doc.moveDown(0.4);
   doc
     .moveTo(doc.page.margins.left, doc.y)
@@ -353,6 +424,8 @@ export function writeSummary(order, delivery, attachments = []) {
   );
   line(doc, 'Entrega', `${delivery.seq} de ${order.deliveries.length}`);
   line(doc, 'Peso', fmtKg(delivery.weightKg));
+  if (order.plates) line(doc, 'Placas', order.plates);
+  if (order.branchInstruction) line(doc, 'Instrução filial', order.branchInstruction);
   doc.moveDown(0.5);
 
   doc
@@ -360,10 +433,11 @@ export function writeSummary(order, delivery, attachments = []) {
     .fillColor('#7d1f16')
     .text(REFUSAL_LABELS[delivery.reason] ?? 'Anomalia sem motivo marcado');
   doc.moveDown(0.3);
+  const detalhe = [delivery.note, delivery.observation].filter(Boolean).join(' · ');
   doc
     .fontSize(10)
     .fillColor('#000000')
-    .text(delivery.note ? delivery.note : 'Sem observação registrada.');
+    .text(detalhe || 'Sem observação registrada.');
   doc.moveDown(0.4);
 
   const resale =
@@ -388,12 +462,6 @@ export function writeSummary(order, delivery, attachments = []) {
     drawPhotos(doc, photos);
   }
 
-  let folder = null;
-  try {
-    folder = targetDir(order, delivery).dir;
-  } catch {
-    // pasta de relatórios fora do ar: o PDF nasce na fila local e ganha o caminho quando for enviado
-  }
   doc.moveDown(0.8);
   doc
     .fontSize(8)
@@ -405,7 +473,15 @@ export function writeSummary(order, delivery, attachments = []) {
     );
 
   doc.end();
-  return done.then(() => finish(order, delivery, Buffer.concat(chunks)));
+  return done
+    .then(() => finish(order, delivery, temp, folder))
+    .finally(() => {
+      try {
+        fs.rmSync(temp, { force: true });
+      } catch {
+        // o antivírus pode segurar o arquivo por um instante; a pasta da fila é limpa depois
+      }
+    });
 }
 
 /** Nome do arquivo de resumo da anomalia. */
@@ -417,10 +493,11 @@ function summaryFileName(order, delivery) {
   );
 }
 
-function finish(order, delivery, buffer) {
+function finish(order, delivery, temp, folder) {
   const previous = summaryAttachment(order.id, delivery.seq);
   const id = previous?.id ?? randomUUID();
   const fileName = summaryFileName(order, delivery);
+  const bytes = fs.statSync(temp).size;
   if (!previous) {
     addAttachment({
       id,
@@ -428,37 +505,50 @@ function finish(order, delivery, buffer) {
       seq: delivery.seq,
       name: fileName,
       mime: 'application/pdf',
-      bytes: buffer.length,
+      bytes,
       kind: 'resumo',
       status: 'fila',
     });
   }
-  try {
-    const { dir } = targetDir(order, delivery);
-    const own =
-      previous?.path && path.basename(previous.path) === fileName ? previous.path : undefined;
-    const target = uniqueIn(dir, fileName, own);
-    fs.writeFileSync(target, buffer);
-    // o nome acompanha o motivo: se mudou, o resumo antigo (nosso) sai de cena para não deixar etiqueta errada na pasta
-    if (previous?.path && previous.path !== target) fs.rmSync(previous.path, { force: true });
-    setAttachmentLocation(id, {
-      status: 'no_s',
-      path: target,
-      bytes: buffer.length,
-      name: fileName,
-    });
-  } catch (error) {
-    if (!(error instanceof FolderUnavailable)) throw error;
-    const queued = writeSpool(id, fileName, buffer);
-    if (previous?.path && previous.status === 'fila' && previous.path !== queued)
-      fs.rmSync(previous.path, { force: true });
-    setAttachmentLocation(id, {
-      status: 'fila',
-      path: queued,
-      bytes: buffer.length,
-      name: fileName,
-    });
+
+  if (folder) {
+    let target = null;
+    try {
+      const own =
+        previous?.path && path.basename(previous.path) === fileName ? previous.path : undefined;
+      target = uniqueIn(folder, fileName, own);
+      fs.copyFileSync(temp, target);
+      // o nome acompanha o motivo: se mudou, o resumo antigo (nosso) sai de cena para não deixar etiqueta errada na pasta
+      if (previous?.path && previous.path !== target) fs.rmSync(previous.path, { force: true });
+      setAttachmentLocation(id, {
+        status: 'no_s',
+        path: target,
+        bytes,
+        name: fileName,
+      });
+      return getAttachment(id);
+    } catch {
+      // rede caiu no meio da gravação: tira o resto incompleto e deixa na fila para reenviar
+      if (target) {
+        try {
+          fs.rmSync(target, { force: true });
+        } catch {
+          // sem permissão para limpar: a próxima gravação escolhe outro nome
+        }
+      }
+    }
   }
+
+  const queued = spoolPath(id, fileName);
+  if (previous?.path && previous.status === 'fila' && previous.path !== queued)
+    fs.rmSync(previous.path, { force: true });
+  fs.renameSync(temp, queued);
+  setAttachmentLocation(id, {
+    status: 'fila',
+    path: queued,
+    bytes,
+    name: fileName,
+  });
   return getAttachment(id);
 }
 
@@ -467,15 +557,14 @@ export function flushQueue() {
   let moved = 0;
   let pending = 0;
   for (const item of pendingAttachments()) {
-    const order = getOrder(item.orderId);
-    const delivery = order?.deliveries.find((row) => row.seq === item.seq);
     const source = storedPath(item);
-    if (!order || !delivery || !source) {
+    const alvo = source ? getDeliveryForPath(item.orderId, item.seq) : null;
+    if (!alvo) {
       pending += 1;
       continue;
     }
     try {
-      const { dir } = targetDir(order, delivery);
+      const { dir } = targetDir(alvo.order, alvo.delivery);
       const target = uniqueIn(dir, cleanName(item.name, 120));
       fs.copyFileSync(source, target);
       fs.rmSync(source, { force: true });
@@ -491,6 +580,48 @@ export function flushQueue() {
     }
   }
   return { moved, pending };
+}
+
+let lastReconcileAt = 0;
+
+/**
+ * Arquivo apagado direto na pasta da rede sai do sistema também. Só confere quando a raiz do S:
+ * responde: com a rede fora do ar todo caminho parece inexistente e a lista inteira sumiria.
+ * Uma conferência por minuto basta para o app não ficar batendo no S: a cada atualização.
+ */
+export function removeMissingAttachments({ force = false } = {}) {
+  if (!force && Date.now() - lastReconcileAt < 60_000) return { removed: 0, skipped: true };
+  if (!isDirectory(ANEXO_ROOT)) return { removed: 0, skipped: true };
+  lastReconcileAt = Date.now();
+  const gone = attachmentsOnNetwork()
+    .filter((item) => dentroDe(ANEXO_ROOT, item.path) && !fs.existsSync(item.path))
+    .map((item) => item.id);
+  return { removed: deleteAttachmentRows(gone), skipped: false };
+}
+
+/** Só apaga arquivos que o sistema gravou nas próprias pastas de relatório/fila. */
+const dentroDe = (base, file) => {
+  const raiz = path.resolve(base);
+  const alvo = path.resolve(file);
+  return alvo.startsWith(raiz + path.sep);
+};
+
+/** Tira o anexo do registro e do disco (S: ou fila local). O resumo é gerado pelo sistema. */
+export function removeAttachment(id) {
+  const item = getAttachment(id);
+  if (!item) return null;
+  if (item.kind === 'resumo') return { bloqueado: true };
+  if (item.path && (dentroDe(ANEXO_ROOT, item.path) || dentroDe(SPOOL_DIR, item.path))) {
+    try {
+      fs.rmSync(item.path, { force: true });
+    } catch (error) {
+      throw new FolderUnavailable(
+        `não foi possível excluir ${item.path}: ${error.code ?? error.message}`,
+      );
+    }
+  }
+  deleteAttachmentRow(id);
+  return { ...item, bloqueado: false };
 }
 
 export function attachmentRoot() {
