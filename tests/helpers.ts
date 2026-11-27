@@ -15,6 +15,7 @@ export interface Api {
   pdfsLocal: string;
   clones: string;
   carteira: string;
+  backups: string;
   url: string;
   get: (rota: string) => Promise<Response>;
   post: (rota: string, corpo: unknown) => Promise<Response>;
@@ -55,6 +56,7 @@ export async function montarApi(): Promise<Api> {
   const pdfsLocal = path.join(dir, 'pdfs-local');
   const clones = path.join(dir, 'clones');
   const carteira = path.join(dir, 'carteira');
+  const backups = path.join(dir, 'backups');
   for (const pasta of [pdfs, pdfsLocal, clones, carteira]) fs.mkdirSync(pasta, { recursive: true });
 
   process.env.FRIBOI_DB = db;
@@ -65,7 +67,7 @@ export async function montarApi(): Promise<Api> {
   process.env.FRIBOI_CLONES_DIR = clones;
   process.env.FRIBOI_CARTEIRA_DIR = carteira;
   process.env.FRIBOI_CREDITO_JSON = path.join(carteira, 'media_compras.json');
-  process.env.FRIBOI_BACKUP_DIR = path.join(dir, 'backups');
+  process.env.FRIBOI_BACKUP_DIR = backups;
 
   const { router: emissor } = await import('../server/emissor.js');
   const { router: emissorPedidos } = await import('../server/emissorPedidos.js');
@@ -88,6 +90,7 @@ export async function montarApi(): Promise<Api> {
     pdfsLocal,
     clones,
     carteira,
+    backups,
     url,
     get: (rota) => fetch(`${url}${rota}`),
     post: (rota, corpo) =>

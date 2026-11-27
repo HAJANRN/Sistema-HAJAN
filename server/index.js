@@ -29,6 +29,7 @@ import {
 } from './acesso.js';
 import { router as emissorRouter } from './emissor.js';
 import { router as emissorPedidosRouter } from './emissorPedidos.js';
+import { router as emissorImportarRouter } from './emissorImportar.js';
 import { getScanState, scanAll, startWatch } from './importer.js';
 import { getBillingState, startBillingWatch, syncBilling } from './billing.js';
 import {
@@ -185,6 +186,9 @@ app.use('/api/emissor', emissorRouter);
 
 /** Digitação de pedidos: base, carteira, clones, emissão e download do PDF (rotas novas, sem prefixo próprio). */
 app.use('/api/emissor', emissorPedidosRouter);
+
+/** Importação das planilhas da base (backup + transação única); passa pelo gate de administração acima. */
+app.use('/api/emissor', emissorImportarRouter);
 
 /** Primeira vez define; depois disso só quem já está dentro troca a senha. */
 app.post('/api/senha', (req, res) => {

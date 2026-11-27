@@ -1,14 +1,32 @@
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import XLSX from 'xlsx';
 import { BACKUP_DIR } from './config.js';
-import { gravar } from './emissorBanco.js';
+import { gravar, responderSemBanco } from './emissorBanco.js';
 
 export const router = express.Router();
-const LIMITE = 4 * 25 * 1024 * 1024;
+
+/** Teto por planilha. O corpo inteiro ganha folga para o multipart das quatro. */
+const LIMITE_ARQUIVO = 25 * 1024 * 1024;
+const LIMITE_CORPO = 4 * LIMITE_ARQUIVO + 1024 * 1024;
 
 const erro400 = (mensagem) => Object.assign(new Error(mensagem), { status: 400 });
+
+/**
+ * Mesmo regime das rotas do emissor: banco fora do ar vira 503 amigável; qualquer outro erro fica
+ * só no log do servidor e vira JSON genérico — `erro.message` pode citar o caminho absoluto do
+ * backup (pasta local ou de rede) e não pode chegar ao cliente.
+ */
+function responderErro(res, erro) {
+  try {
+    responderSemBanco(res, erro);
+  } catch {
+    console.error('falha na importação:', erro);
+    if (!res.headersSent) res.status(500).json({ error: 'não consegui importar as planilhas' });
+  }
+}
 
 const chave = (texto) =>
   String(texto ?? '')
@@ -142,9 +160,9 @@ function linhasDaAba(buffer, config, tipo) {
 
 function lerClientes(buffer) {
   const mapa = new Map();
+  let ignoradas = 0;
   for (const linha of linhasDaAba(buffer, COLUNAS.clientes, 'clientes')) {
     const codigo = texto(linha.codigo);
-    if (!codigo) continue;
     const registro = {
       codigo,
       nome_formatado: texto(linha.nome_formatado),
@@ -156,18 +174,25 @@ function lerClientes(buffer) {
       codigo_centralizador: texto(linha.codigo_centralizador),
       status_cliente: texto(linha.status_cliente),
     };
-    if (!registro.nome_formatado) continue;
+    if (!codigo || !registro.nome_formatado) {
+      ignoradas += 1;
+      continue;
+    }
     mapa.set(codigo === '0' ? `0|${chave(registro.nome_formatado)}` : codigo, registro);
   }
-  return [...mapa.values()];
+  return { registros: [...mapa.values()], ignoradas };
 }
 
 function lerProdutos(buffer) {
   const mapa = new Map();
+  let ignoradas = 0;
   for (const linha of linhasDaAba(buffer, COLUNAS.produtos, 'produtos')) {
     const codigo = texto(linha.codigo);
     const descricao = texto(linha.descricao);
-    if (!codigo || !descricao) continue;
+    if (!codigo || !descricao) {
+      ignoradas += 1;
+      continue;
+    }
     const peso = numero(linha.peso, 1);
     mapa.set(`${codigo}|${chave(descricao)}`, {
       codigo,
@@ -182,14 +207,18 @@ function lerProdutos(buffer) {
       categoria: texto(linha.categoria),
     });
   }
-  return [...mapa.values()];
+  return { registros: [...mapa.values()], ignoradas };
 }
 
 function lerLimites(buffer) {
   const mapa = new Map();
+  let ignoradas = 0;
   for (const linha of linhasDaAba(buffer, COLUNAS.limites, 'limites')) {
     const codigo = texto(linha.codigo_centralizador);
-    if (!codigo) continue;
+    if (!codigo) {
+      ignoradas += 1;
+      continue;
+    }
     mapa.set(codigo, {
       codigo_centralizador: codigo,
       centralizador: texto(linha.centralizador),
@@ -197,18 +226,22 @@ function lerLimites(buffer) {
       disponivel: numero(linha.disponivel, 0),
     });
   }
-  return [...mapa.values()];
+  return { registros: [...mapa.values()], ignoradas };
 }
 
 function lerUnidades(buffer) {
   const mapa = new Map();
+  let ignoradas = 0;
   for (const linha of linhasDaAba(buffer, COLUNAS.unidades, 'unidades')) {
     const sigla = texto(linha.sigla).toUpperCase();
     const nome = texto(linha.nome);
-    if (!sigla || !nome) continue;
+    if (!sigla || !nome) {
+      ignoradas += 1;
+      continue;
+    }
     mapa.set(sigla, { sigla, nome, critica: texto(linha.critica).toUpperCase() });
   }
-  return [...mapa.values()];
+  return { registros: [...mapa.values()], ignoradas };
 }
 
 const TABELAS = {
@@ -245,19 +278,47 @@ const TABELAS = {
 
 function backupDoBanco(db) {
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  // o timestamp com ms pode repetir em dois POSTs simultâneos e o VACUUM INTO recusa destino
+  // existente; o sufixo aleatório desempata sem atrapalhar a ordem (o carimbo vem primeiro)
   const carimbo = new Date().toISOString().replace(/[:.]/g, '-');
-  const destino = path.join(BACKUP_DIR, `hajan-${carimbo}.db`);
+  const sufixo = randomBytes(3).toString('hex');
+  const destino = path.join(BACKUP_DIR, `hajan-${carimbo}-${sufixo}.db`);
   db.exec(`VACUUM INTO '${destino.replace(/'/g, "''")}'`);
   const antigos = fs
     .readdirSync(BACKUP_DIR)
     .filter((nome) => /^hajan-.*\.db$/.test(nome))
     .sort()
     .reverse();
-  for (const nome of antigos.slice(10)) fs.unlinkSync(path.join(BACKUP_DIR, nome));
+  for (const nome of antigos.slice(10)) {
+    // best-effort: backup que não pode ser apagado (arquivo aberto na rede) não derruba a importação
+    try {
+      fs.unlinkSync(path.join(BACKUP_DIR, nome));
+    } catch (erro) {
+      console.warn(`importação: não consegui apagar o backup antigo ${nome}:`, erro.message);
+    }
+  }
   return destino;
 }
 
-router.post('/importar', express.raw({ type: 'multipart/form-data', limit: LIMITE }), async (req, res) => {
+const lerCorpo = express.raw({ type: 'multipart/form-data', limit: LIMITE_CORPO });
+
+/**
+ * O parser grande vale só nesta rota (o limite global do app continua o dele) e o erro do
+ * body-parser é traduzido aqui para JSON — sem isso, corpo acima do limite cairia na página
+ * HTML padrão do Express, com stack.
+ */
+const corpoDaImportacao = (req, res, next) =>
+  lerCorpo(req, res, (erro) => {
+    if (!erro) return next();
+    if (erro.type === 'entity.too.large') {
+      return res.status(413).json({
+        error: `envie até ${Math.round(LIMITE_ARQUIVO / 1_048_576)} MB por planilha (4 planilhas por importação)`,
+      });
+    }
+    return res.status(400).json({ error: 'não consegui ler o corpo da importação' });
+  });
+
+router.post('/importar', corpoDaImportacao, async (req, res) => {
   try {
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
       throw erro400('envie as planilhas no corpo multipart/form-data');
@@ -269,25 +330,36 @@ router.post('/importar', express.raw({ type: 'multipart/form-data', limit: LIMIT
     }).formData();
 
     const planilhas = {};
+    const ignoradas = { clientes: 0, produtos: 0, limites: 0, unidades: 0 };
     for (const tipo of Object.keys(TABELAS)) {
       const arquivo = formulario.get(tipo);
       if (!arquivo || typeof arquivo === 'string') continue;
       if (!/\.xlsx$/i.test(arquivo.name)) throw erro400(`${tipo}: envie um arquivo .xlsx`);
-      if (arquivo.size > 25 * 1024 * 1024) throw erro400(`${tipo}: arquivo acima de 25 MB`);
+      if (arquivo.size > LIMITE_ARQUIVO) throw erro400(`${tipo}: arquivo acima de 25 MB`);
       const bytes = Buffer.from(await arquivo.arrayBuffer());
       if (bytes.subarray(0, 2).toString() !== 'PK') throw erro400(`${tipo}: arquivo não é uma planilha xlsx válida`);
-      let registros;
+      let lida;
       try {
-        registros = TABELAS[tipo].ler(bytes);
+        lida = TABELAS[tipo].ler(bytes);
       } catch (erro) {
         if (erro.status === 400) throw erro;
         throw erro400(`${tipo}: não consegui ler a planilha (${erro.message})`);
       }
-      if (registros.length === 0) throw erro400(`${tipo}: nenhuma linha válida na planilha`);
-      planilhas[tipo] = registros;
+      ignoradas[tipo] = lida.ignoradas;
+      if (lida.registros.length === 0) throw erro400(`${tipo}: nenhuma linha válida na planilha`);
+      planilhas[tipo] = lida.registros;
     }
 
     if (Object.keys(planilhas).length === 0) throw erro400('envie pelo menos uma planilha');
+
+    const descartadas = Object.values(ignoradas).reduce((soma, total) => soma + total, 0);
+    if (descartadas > 0) {
+      const resumo = Object.entries(ignoradas)
+        .filter(([, total]) => total > 0)
+        .map(([tipo, total]) => `${tipo}: ${total}`)
+        .join(', ');
+      console.warn(`importação: ${descartadas} linha(s) sem código/nome/descrição/sigla ignorada(s) — ${resumo}`);
+    }
 
     const db = gravar();
     const backup = backupDoBanco(db);
@@ -304,18 +376,17 @@ router.post('/importar', express.raw({ type: 'multipart/form-data', limit: LIMIT
       }
       db.exec('COMMIT');
     } catch (erro) {
-      db.exec('ROLLBACK');
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // transação já desfeita pelo SQLite: não pode contaminar a conexão compartilhada
+      }
       throw erro;
     }
 
-    res.json({ backup, contagens });
+    res.json({ backup, contagens, ignoradas });
   } catch (erro) {
     if (erro.status === 400) return res.status(400).json({ error: erro.message });
-    const mensagem = String(erro?.message ?? erro);
-    if (/no such table|unable to open|no such file/.test(mensagem)) {
-      return res.status(503).json({ error: 'banco de dados do emissor indisponível no servidor' });
-    }
-    console.error('falha na importação:', erro);
-    res.status(500).json({ error: `não consegui importar: ${mensagem}` });
+    responderErro(res, erro);
   }
 });
