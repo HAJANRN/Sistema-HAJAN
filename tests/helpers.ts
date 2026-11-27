@@ -62,9 +62,11 @@ export async function montarApi(): Promise<Api> {
   process.env.FRIBOI_CREDITO_JSON = path.join(carteira, 'media_compras.json');
 
   const { router: emissor } = await import('../server/emissor.js');
+  const { router: emissorPedidos } = await import('../server/emissorPedidos.js');
   const app = express();
   app.use(express.json({ limit: '64kb' }));
   app.use('/api/emissor', emissor);
+  app.use('/api/emissor', emissorPedidos);
 
   const servidor = app.listen(0, '127.0.0.1');
   await new Promise((ok) => servidor.once('listening', ok));
