@@ -82,6 +82,8 @@ export interface EmissaoResultado {
 export interface ImportacaoResultado {
   backup: string;
   contagens: { clientes: number; produtos: number; limites: number; unidades: number };
+  /** Linhas descartadas por falta de código/nome/descrição/sigla (campo aditivo do servidor). */
+  ignoradas: { clientes: number; produtos: number; limites: number; unidades: number };
 }
 
 /**

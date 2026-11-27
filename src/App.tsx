@@ -10,12 +10,14 @@ import { FinanceiroPagarScreen } from './screens/FinanceiroPagarScreen';
 import { FinanceiroReceberScreen } from './screens/FinanceiroReceberScreen';
 import { FinanceiroDashboardScreen } from './screens/FinanceiroDashboardScreen';
 import { EmissorPedidoScreen } from './screens/EmissorPedidoScreen';
+import { ImportarPlanilhasScreen } from './screens/ImportarPlanilhasScreen';
 import { api } from './api';
 import { initSync, sair, subscribeSync, syncNow, syncSnapshot } from './sync';
 import { relativeTime, todayISO } from './utils';
 
 type Rota =
   | 'novo-pedido'
+  | 'importar-planilhas'
   | 'pedidos-emitidos'
   | 'cargas'
   | 'anomalias'
@@ -31,6 +33,7 @@ const MENU: { grupo: string; itens: { rota: Rota; label: string }[] }[] = [
     grupo: 'Digitação de pedidos',
     itens: [
       { rota: 'novo-pedido', label: 'Novo pedido' },
+      { rota: 'importar-planilhas', label: 'Importar planilhas' },
       { rota: 'pedidos-emitidos', label: 'Pedidos emitidos' },
     ],
   },
@@ -278,6 +281,7 @@ export default function App() {
             <OrderDetail orderId={openOrderId} onBack={() => setOpenOrderId(null)} />
           )}
           {rota === 'novo-pedido' && <EmissorPedidoScreen />}
+          {rota === 'importar-planilhas' && <ImportarPlanilhasScreen />}
         </main>
       </div>
 
