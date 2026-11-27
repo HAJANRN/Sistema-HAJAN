@@ -67,9 +67,6 @@ button { cursor: pointer; }
 .app { min-height: 100vh; display: flex; flex-direction: column; }
 .app-shell { flex-direction: row; }
 .content { width: 100%; max-width: 1320px; margin: 0 auto; padding: 24px 24px 72px; flex: 1; }
-.content-emissor { display: flex; width: 100%; max-width: none; min-height: 0; padding: 0; }
-.emissor-frame { display: block; width: 100%; min-height: calc(100vh - 64px); flex: 1; border: 0; background: var(--surface); }
-.emissor-frame[hidden] { display: none; }
 .painel-shell[hidden] { display: none; }
 
 .sidebar { position: sticky; top: 0; z-index: 30; height: 100vh; width: 252px; flex: none; display: flex; flex-direction: column; gap: 20px; padding: 18px 14px 16px; background: var(--pine); color: #f3f7f3; overflow-y: auto; border-right: 1px solid rgba(255, 255, 255, 0.08); }
@@ -602,3 +599,20 @@ code { font-family: var(--font-data); font-size: 0.9em; background: var(--surfac
 .emissor-entrega-pe { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
 .emissor-acoes { display: flex; gap: 8px; }
 .tabular { font-variant-numeric: tabular-nums; }
+.emissor-resumo { display: flex; gap: 22px; flex-wrap: wrap; }
+.emissor-resumo span { display: flex; flex-direction: column; gap: 2px; }
+.emissor-resumo small { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.emissor-resumo strong { font-size: 17px; }
+.emissor-lateral { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.emissor-credito ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.credito-linha { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); flex-wrap: wrap; }
+.credito-linha.erro { border-color: #b3261e; background: color-mix(in srgb, #b3261e 8%, transparent); }
+.credito-linha.aviso { border-color: #a8730b; background: color-mix(in srgb, #a8730b 8%, transparent); }
+.credito-linha div { display: flex; flex-direction: column; gap: 2px; }
+.credito-linha small { color: var(--muted); font-variant-numeric: tabular-nums; }
+.credito-msg { font-size: 12px; }
+.credito-msg.erro { color: #b3261e; }
+.credito-msg.aviso { color: #a8730b; }
+.emissor-clonagem-botao { display: flex; align-items: flex-end; }
+.emissor-gerar .emissor-acoes { align-items: center; }
+.emissor-resultado { display: flex; flex-direction: column; gap: 8px; }

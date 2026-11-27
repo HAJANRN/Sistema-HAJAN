@@ -6,6 +6,7 @@ import { Clonagem } from './emissor/Clonagem';
 import { DadosGerais } from './emissor/DadosGerais';
 import { EntregaCard } from './emissor/EntregaCard';
 import { GerarPedido } from './emissor/GerarPedido';
+import { PainelCredito } from './emissor/PainelCredito';
 import { ResumoCarga } from './emissor/ResumoCarga';
 
 export function EmissorPedidoScreen() {
@@ -96,6 +97,10 @@ function Formulario({ base, onNovo }: { base: BaseEmissor; onNovo: () => void })
         <button type="button" className="btn ghost" onClick={() => dispatch({ tipo: 'novaEntrega' })}>
           + Entrega
         </button>
+      </div>
+
+      <div className="emissor-lateral">
+        <PainelCredito estado={estado} base={base} />
       </div>
 
       <GerarPedido estado={estado} onNovo={onNovo} />

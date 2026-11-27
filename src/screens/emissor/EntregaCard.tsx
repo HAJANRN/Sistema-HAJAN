@@ -64,6 +64,9 @@ function CampoNumero({
 
 export function EntregaCard({ entrega, indice, total, base, dispatch }: Props) {
   const esc = ehEsc(entrega.cliente) || ehEsc(entrega.destino);
+  // Mesma regra do produto: nome de clone antigo que saiu da base continua visível.
+  const clienteForaDaBase =
+    entrega.cliente !== '' && !base.clientes.some((c) => c.nome === entrega.cliente);
   const campoProduto = (produto: ProdutoForm, campo: keyof ProdutoForm, valor: string | number) =>
     dispatch({
       tipo: 'campoProduto',
@@ -123,6 +126,11 @@ export function EntregaCard({ entrega, indice, total, base, dispatch }: Props) {
               dispatch({ tipo: 'campoEntrega', id: entrega.id, campo: 'cliente', valor: event.target.value })
             }
           >
+            {/* Cliente vindo de um clone pode não existir mais na base: sem esta opção
+                o <select> apareceria em branco e preso no valor antigo. */}
+            {clienteForaDaBase && (
+              <option value={entrega.cliente}>{entrega.cliente} (fora do catálogo)</option>
+            )}
             {base.clientes.map((cliente) => (
               <option key={cliente.codigo} value={cliente.nome}>
                 {cliente.nome}
