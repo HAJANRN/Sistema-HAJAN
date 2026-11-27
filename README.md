@@ -26,6 +26,8 @@ O pedido é montado na tela e finalizado em **Gerar pedido**. O PDF é produzido
 - **Escritório (Windows):** o emissor roda localmente na máquina e na rede interna do escritório.
 - **Servidor (VPS):** a mesma aplicação roda em container, com a base, os logs e os arquivos gerados em volume persistente.
 
+A instalação no escritório, o servidor com vigia e o deploy na VPS estão em [INSTALACAO.md](INSTALACAO.md).
+
 O sistema é feito para uso interno e trabalha apenas com dados comerciais da empresa e de seus clientes.
 
 ## Atualizações

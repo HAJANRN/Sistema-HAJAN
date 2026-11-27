@@ -2,6 +2,13 @@
 
 Registro das alterações do sistema, uma entrada por atualização publicada. Entradas mais recentes no topo.
 
+## 2026-11-27 — Guia de instalação e implantação
+
+**Tipo:** documentação
+
+- Novo `INSTALACAO.md` com a instalação no Windows (launcher C#, `iniciar_hajan.bat`), o servidor da rede (`iniciar_servidor.ps1`, `iniciar_rede.bat`, `vigia_servidor.ps1`), o deploy na VPS com Docker Compose e Caddy pela VPN, o backup com `deploy/backup_db.py` e a migração para MySQL.
+- As instruções foram refeitas a partir dos scripts atuais, que substituem a documentação operacional antes mantida no `README.md`.
+
 ## 2026-11-26 — README com descrição do produto
 
 **Tipo:** documentação
