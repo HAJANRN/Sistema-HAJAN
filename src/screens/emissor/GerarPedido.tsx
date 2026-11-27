@@ -51,6 +51,7 @@ export function GerarPedido({ estado, onNovo }: Props) {
   };
 
   const gerar = async () => {
+    if (busy) return;
     const problemas = problemasDoPedido(estado);
     if (problemas.length > 0) {
       setErro(problemas.join(' · '));
@@ -91,7 +92,11 @@ export function GerarPedido({ estado, onNovo }: Props) {
             </button>
           </div>
         </form>
-        {erro && <p className="alert">{erro}</p>}
+        {erro && (
+          <p className="alert" role="alert">
+            {erro}
+          </p>
+        )}
       </section>
     );
   }
@@ -99,7 +104,11 @@ export function GerarPedido({ estado, onNovo }: Props) {
   return (
     <section className="card emissor-gerar">
       <h2>Gerar pedido</h2>
-      {erro && <p className="alert">{erro}</p>}
+      {erro && (
+        <p className="alert" role="alert">
+          {erro}
+        </p>
+      )}
       {resultado ? (
         <div className="emissor-resultado">
           <p>

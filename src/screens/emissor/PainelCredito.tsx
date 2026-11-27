@@ -28,6 +28,9 @@ export function PainelCredito({ estado, base }: { estado: Estado; base: BaseEmis
       .catch(() => setFalhou(true));
   }, []);
 
+  // resposta sem carteira (`{disponivel:false}`) cai no mesmo aviso da exceção
+  const semCarteira = falhou || carteira?.disponivel === false;
+
   const grupos = new Map<string, Grupo>();
   for (const entrega of estado.entregas) {
     const cliente = base.clientes.find((c) => c.nome === entrega.cliente);
@@ -45,7 +48,7 @@ export function PainelCredito({ estado, base }: { estado: Estado; base: BaseEmis
   return (
     <section className="card emissor-credito">
       <h2>Limite por cliente</h2>
-      {falhou && <p className="hint">Carteira indisponível — usando o limite da base.</p>}
+      {semCarteira && <p className="hint">Carteira indisponível — usando o limite da base.</p>}
       {!carteira && !falhou && <p className="panel-sub">Consultando a carteira…</p>}
       <ul>
         {[...grupos.values()].map((grupo) => (

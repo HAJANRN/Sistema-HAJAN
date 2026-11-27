@@ -605,7 +605,7 @@ code { font-family: var(--font-data); font-size: 0.9em; background: var(--surfac
 .emissor-resumo strong { font-size: 17px; }
 .emissor-lateral { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
 .emissor-credito ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.credito-linha { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); flex-wrap: wrap; }
+.credito-linha { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); flex-wrap: wrap; }
 .credito-linha.erro { border-color: #b3261e; background: color-mix(in srgb, #b3261e 8%, transparent); }
 .credito-linha.aviso { border-color: #a8730b; background: color-mix(in srgb, #a8730b 8%, transparent); }
 .credito-linha div { display: flex; flex-direction: column; gap: 2px; }
