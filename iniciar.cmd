@@ -1,7 +1,5 @@
 @echo off
 setlocal
-set "NODE_DIR=%LOCALAPPDATA%\portable-node\node-v24.18.0-win-x64"
-if exist "%NODE_DIR%\node.exe" set "PATH=%NODE_DIR%;%PATH%"
 cd /d "%~dp0"
 
 if not exist "dist\index.html" (
@@ -10,7 +8,7 @@ if not exist "dist\index.html" (
   if errorlevel 1 goto falhou
 )
 
-echo Iniciando o servidor local (le as pastas da rede)...
+echo Iniciando o Acompanhamento de entregas...
 call npm start
 pause
 exit /b 0
