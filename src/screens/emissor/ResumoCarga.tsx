@@ -3,7 +3,7 @@ import type { Estado } from '../../emissor/estado';
 import { formatarMoeda, formatarNumero } from '../../emissor/formato';
 
 export function ResumoCarga({ estado }: { estado: Estado }) {
-  const resumo = resumoPedido({ ...estado.dados, entregas: estado.entregas });
+  const resumo = resumoPedido({ ...estado.dados, entregas: estado.entregas }, estado.base);
   return (
     <div className="emissor-resumo tabular">
       <span>

@@ -110,24 +110,28 @@ export function ImportarPlanilhasScreen() {
             {erro}
           </p>
         )}
-        {resultado && (
-          <div className="emissor-resultado" aria-live="polite">
-            <p>
-              {importados.length > 0
-                ? `Importado: ${importados.map((tipo) => comNome(tipo, resultado.contagens[tipo])).join(' · ')}`
-                : 'Nenhuma linha importada.'}
-            </p>
-            {ignorados.length > 0 && (
-              <p className="emissor-ignoradas">
-                Linhas ignoradas (sem código, nome, descrição ou sigla):{' '}
-                {ignorados.map((tipo) => comNome(tipo, resultado.ignoradas[tipo])).join(' · ')}
+        {/* A região viva tem de existir antes do texto: montada junto do resultado,
+            o leitor de tela não anuncia a importação concluída. */}
+        <div className="emissor-resultado" aria-live="polite">
+          {resultado && (
+            <>
+              <p>
+                {importados.length > 0
+                  ? `Importado: ${importados.map((tipo) => comNome(tipo, resultado.contagens[tipo])).join(' · ')}`
+                  : 'Nenhuma linha importada.'}
               </p>
-            )}
-            <p className="hint">
-              Backup: <code>{resultado.backup}</code>
-            </p>
-          </div>
-        )}
+              {ignorados.length > 0 && (
+                <p className="emissor-ignoradas">
+                  Linhas ignoradas (sem código, nome, descrição ou sigla):{' '}
+                  {ignorados.map((tipo) => comNome(tipo, resultado.ignoradas[tipo])).join(' · ')}
+                </p>
+              )}
+              <p className="hint">
+                Backup: <code>{resultado.backup}</code>
+              </p>
+            </>
+          )}
+        </div>
       </section>
     </section>
   );

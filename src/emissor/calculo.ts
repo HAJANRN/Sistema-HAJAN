@@ -1,4 +1,4 @@
-import type { EntregaForm, PedidoForm, ResumoPedido } from './tipos';
+import type { BaseEmissor, EntregaForm, PedidoForm, ProdutoForm, ResumoPedido } from './tipos';
 
 export const CATEGORIAS = ['CXS', 'PÇS', 'CHQ', 'SPG'] as const;
 
@@ -13,12 +13,24 @@ export function categoriaDoProduto(categoria: string): string {
   return (CATEGORIAS as readonly string[]).includes(texto) ? texto : '';
 }
 
-export function categoriasDoPedido(pedido: PedidoForm): string[] {
+/**
+ * Categoria vazia na linha = herdada do catálogo. Com a base em mãos o resumo usa a
+ * mesma regra do servidor (catálogo e, sem ele, PÇS); sem a base, a linha conta como
+ * sem categoria — que é o fallback PÇS.
+ */
+export function categoriaDaLinha(produto: ProdutoForm, base?: BaseEmissor): string {
+  return (
+    categoriaDoProduto(produto.categoria) ||
+    categoriaDoProduto(base?.produtos.find((p) => p.codigo === produto.codigo)?.categoria ?? '')
+  );
+}
+
+export function categoriasDoPedido(pedido: PedidoForm, base?: BaseEmissor): string[] {
   const presentes = new Set<string>();
   for (const entrega of pedido.entregas) {
     if (ehEsc(entrega.cliente) || ehEsc(entrega.destino)) continue;
     for (const produto of entrega.produtos) {
-      const categoria = categoriaDoProduto(produto.categoria);
+      const categoria = categoriaDaLinha(produto, base);
       if (categoria) presentes.add(categoria);
     }
   }
@@ -26,8 +38,8 @@ export function categoriasDoPedido(pedido: PedidoForm): string[] {
   return CATEGORIAS.filter((c) => presentes.has(c));
 }
 
-export function rotuloCategorias(pedido: PedidoForm): string {
-  return categoriasDoPedido(pedido).join('-');
+export function rotuloCategorias(pedido: PedidoForm, base?: BaseEmissor): string {
+  return categoriasDoPedido(pedido, base).join('-');
 }
 
 export function pesoEntrega(entrega: EntregaForm): number {
@@ -55,10 +67,10 @@ export function nfsRemessa(pedido: PedidoForm): number {
   return pedido.entregas.filter((e) => e.operacao !== 9).length;
 }
 
-export function resumoPedido(pedido: PedidoForm): ResumoPedido {
+export function resumoPedido(pedido: PedidoForm, base?: BaseEmissor): ResumoPedido {
   const peso = pesoTotal(pedido);
   return {
-    categorias: rotuloCategorias(pedido),
+    categorias: rotuloCategorias(pedido, base),
     pesoTotal: peso,
     valor: valorTotal(pedido),
     veiculo: veiculoDoPeso(peso),

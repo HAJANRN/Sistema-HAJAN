@@ -85,7 +85,8 @@ function produtoVazio(base: BaseEmissor, prazo: string, id: string = novoId()): 
     peso: primeiro?.peso ?? 1,
     preco: 0,
     prazo,
-    categoria: primeiro?.categoria ?? 'CXS',
+    // Categoria vazia = herdada: o servidor usa a do catálogo e, sem ela, PÇS.
+    categoria: '',
   };
 }
 
@@ -172,7 +173,9 @@ export function aplicarClone(estadoAtual: Estado, payload: ClonePayload, base: B
         peso: numeroOu(produto.peso, 1),
         preco: numeroOu(produto.preco, 0),
         prazo: produto.prazo || prazo,
-        categoria: base.produtos.find((p) => p.codigo === produto.codigo)?.categoria ?? '',
+        // O clone não traz categoria: o produto herdado do catálogo continua herdando
+        // (sem entrada no catálogo, o servidor aplica PÇS, como antes).
+        categoria: '',
       })),
     };
   });
@@ -322,7 +325,9 @@ export function reduzir(estado: Estado, acao: Acao): Estado {
                         descricao: acao.produto.descricao,
                         unidade: acao.produto.unidade,
                         peso: acao.produto.peso,
-                        categoria: acao.produto.categoria,
+                        // Trocar o produto volta a categoria para "herdada": a do
+                        // produto anterior não pode continuar valendo para o novo.
+                        categoria: '',
                       }
                     : p,
                 ),
@@ -395,6 +400,8 @@ export function paraPayloadApi(pedido: PedidoForm) {
         peso: p.peso,
         preco: p.preco,
         prazo: p.prazo,
+        // Categoria vazia = herdada: omitida, o servidor usa a do catálogo e, sem ela, PÇS.
+        ...(p.categoria ? { categoria: p.categoria } : {}),
       })),
     })),
   };

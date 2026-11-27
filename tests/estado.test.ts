@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { categoriasDoPedido } from '../src/emissor/calculo.ts';
 import {
   aplicarClone,
   estadoInicial,
+  paraPayloadApi,
   pedidoDe,
   reduzir,
   trocarOperacao,
@@ -150,4 +152,28 @@ test('pedidoDe devolve um PedidoForm completo', () => {
   assert.equal(pedido.entregas.length, 1);
   assert.equal(pedido.entregas[0].produtos[0].prazo, '30');
   assert.match(pedido.dataEmbarque, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test('payload envia a categoria escolhida e omite a herdada', () => {
+  const inicial = estadoInicial(base);
+  // Produto do catálogo nasce em "Auto": sem categoria no corpo, o servidor herda a do catálogo.
+  const herdada = paraPayloadApi(pedidoDe(inicial));
+  assert.equal('categoria' in herdada.entregas[0].produtos[0], false);
+
+  const escolhida = reduzir(inicial, {
+    tipo: 'campoProduto',
+    entregaId: inicial.entregas[0].id,
+    produtoId: inicial.entregas[0].produtos[0].id,
+    campo: 'categoria',
+    valor: 'CHQ',
+  });
+  const payload = paraPayloadApi(pedidoDe(escolhida));
+  assert.equal(payload.entregas[0].produtos[0].categoria, 'CHQ');
+});
+
+test('aplicar clone preserva a categoria herdada do catálogo', () => {
+  const estado = aplicarClone(estadoInicial(base), clone, base);
+  assert.equal(estado.entregas[0].produtos[0].categoria, '');
+  // A linha herdada continua contando a categoria do catálogo no resumo.
+  assert.deepEqual(categoriasDoPedido(pedidoDe(estado), base), ['CXS']);
 });

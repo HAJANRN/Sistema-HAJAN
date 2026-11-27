@@ -7,7 +7,8 @@ import { entrar, syncNow, syncSnapshot, subscribeSync } from '../../sync';
 
 interface Props {
   estado: Estado;
-  onNovo: () => void;
+  /** Relê a base e reinicia o formulário; devolve o motivo quando não conseguiu. */
+  onNovo: (numeroEmitido: string) => Promise<string | null>;
 }
 
 function problemasDoPedido(estado: Estado): string[] {
@@ -34,6 +35,9 @@ export function GerarPedido({ estado, onNovo }: Props) {
   const [erro, setErro] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [resultado, setResultado] = useState<EmissaoResultado | null>(null);
+  // Falha só do "Novo pedido": o pedido emitido continua na tela, com o PDF dele.
+  const [erroNovo, setErroNovo] = useState<string | null>(null);
+  const [novoBusy, setNovoBusy] = useState(false);
 
   const liberar = async () => {
     if (!senha || busy) return;
@@ -67,6 +71,24 @@ export function GerarPedido({ estado, onNovo }: Props) {
       setErro(cause instanceof Error ? cause.message : 'não consegui gerar o pedido');
     } finally {
       setBusy(false);
+    }
+  };
+
+  /**
+   * Novo pedido só abre depois de reler a base: o número do pedido anterior não pode
+   * ser reaproveitado. Se a releitura falhar, o formulário (e o resultado emitido)
+   * continua na tela e o motivo aparece junto do PDF.
+   */
+  const novo = async () => {
+    if (novoBusy) return;
+    setNovoBusy(true);
+    setErroNovo(null);
+    try {
+      const falha = await onNovo(estado.dados.numero);
+      // No sucesso o formulário é remontado com outra key e este cartão sai da tela.
+      if (falha) setErroNovo(falha);
+    } finally {
+      setNovoBusy(false);
     }
   };
 
@@ -128,12 +150,17 @@ export function GerarPedido({ estado, onNovo }: Props) {
               {aviso}
             </p>
           ))}
+          {erroNovo && (
+            <p className="alert" role="alert">
+              {erroNovo}
+            </p>
+          )}
           <div className="emissor-acoes">
             <a className="btn ghost" href={resultado.download} target="_blank" rel="noreferrer">
               Abrir PDF
             </a>
-            <button type="button" className="btn" onClick={onNovo}>
-              Novo pedido
+            <button type="button" className="btn" onClick={() => void novo()} disabled={novoBusy}>
+              {novoBusy ? 'Abrindo…' : 'Novo pedido'}
             </button>
           </div>
         </div>

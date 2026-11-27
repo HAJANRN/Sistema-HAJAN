@@ -92,12 +92,13 @@ export interface ImportacaoResultado {
 /**
  * Corpo de `POST /api/emissor/pedidos`: o `PedidoForm` sem os ids locais da tela,
  * que é exatamente o que `paraPayloadApi` devolve (o envelope não muda). Aceita
- * também um `PedidoForm` inteiro, porque ali só há campos a mais.
+ * também um `PedidoForm` inteiro, porque ali só há campos a mais. `categoria` é
+ * opcional: ausente significa "herdada do catálogo", resolvida pelo servidor.
  */
 export type PedidoEnvio = Omit<PedidoForm, 'entregas'> & {
   entregas: Array<
     Omit<EntregaForm, 'id' | 'produtos'> & {
-      produtos: Array<Omit<ProdutoForm, 'id' | 'categoria'>>;
+      produtos: Array<Omit<ProdutoForm, 'id' | 'categoria'> & { categoria?: string }>;
     }
   >;
 };

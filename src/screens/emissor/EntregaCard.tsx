@@ -1,5 +1,5 @@
 import { useState, type Dispatch } from 'react';
-import { ehEsc, pesoEntrega, valorEntrega } from '../../emissor/calculo';
+import { CATEGORIAS, categoriaDoProduto, ehEsc, pesoEntrega, valorEntrega } from '../../emissor/calculo';
 import type { Acao } from '../../emissor/estado';
 import { converterNumero, formatarMoeda, formatarNumero } from '../../emissor/formato';
 import type { BaseEmissor, EntregaForm, ProdutoForm } from '../../emissor/tipos';
@@ -187,6 +187,7 @@ export function EntregaCard({ entrega, indice, total, base, dispatch }: Props) {
           <table className="emissor-tabela">
             <thead>
               <tr>
+                <th scope="col">Categoria</th>
                 <th scope="col">Produto</th>
                 <th scope="col">Qtde.</th>
                 <th scope="col">Unid.</th>
@@ -199,12 +200,49 @@ export function EntregaCard({ entrega, indice, total, base, dispatch }: Props) {
             <tbody>
               {entrega.produtos.map((produto, linha) => {
                 const nome = produto.descricao || produto.codigo || `item ${linha + 1}`;
+                const catalogo =
+                  produto.codigo === ''
+                    ? undefined
+                    : base.produtos.find((p) => p.codigo === produto.codigo);
                 // Código vindo de um clone pode não existir mais no catálogo: sem esta
                 // opção o <select> apareceria em branco e preso no valor antigo.
-                const foraDoCatalogo =
-                  produto.codigo !== '' && !base.produtos.some((p) => p.codigo === produto.codigo);
+                const foraDoCatalogo = produto.codigo !== '' && !catalogo;
+                // Categoria da linha: a escolhida ou, em "Auto", a que vem do catálogo.
+                const categoriaCatalogo = categoriaDoProduto(catalogo?.categoria ?? '');
+                const categoriaLinha = categoriaDoProduto(produto.categoria) || categoriaCatalogo;
+                const opcoes = (lista: typeof base.produtos) =>
+                  lista.map((p) => (
+                    <option key={p.codigo} value={p.codigo}>
+                      {p.rotulo}
+                    </option>
+                  ));
+                // A categoria escolhida prioriza o catálogo no seletor de produto (o
+                // controle segmentado do Emissor filtrava; aqui agrupa para não esconder
+                // produto nenhum — inclusive o que já está na linha).
+                const prioritarios = categoriaLinha
+                  ? base.produtos.filter((p) => categoriaDoProduto(p.categoria) === categoriaLinha)
+                  : base.produtos;
+                const restantes = categoriaLinha
+                  ? base.produtos.filter((p) => categoriaDoProduto(p.categoria) !== categoriaLinha)
+                  : [];
                 return (
                   <tr key={produto.id}>
+                    <td>
+                      {/* "Auto" = herdar do catálogo; é o padrão de um produto do catálogo.
+                          Produto sem categoria de catálogo cai em PÇS, como no servidor. */}
+                      <select
+                        aria-label={`Categoria — ${nome}`}
+                        value={produto.categoria}
+                        onChange={(event) => campoProduto(produto, 'categoria', event.target.value)}
+                      >
+                        <option value="">{categoriaCatalogo ? `Auto — ${categoriaCatalogo}` : 'Auto — PÇS'}</option>
+                        {CATEGORIAS.map((categoria) => (
+                          <option key={categoria} value={categoria}>
+                            {categoria}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
                     <td>
                       <select
                         aria-label={`Produto da linha ${linha + 1}`}
@@ -229,11 +267,16 @@ export function EntregaCard({ entrega, indice, total, base, dispatch }: Props) {
                       >
                         <option value="">—</option>
                         {foraDoCatalogo && <option value={produto.codigo}>{produto.codigo} (fora do catálogo)</option>}
-                        {base.produtos.map((p) => (
-                          <option key={p.codigo} value={p.codigo}>
-                            {p.rotulo}
-                          </option>
-                        ))}
+                        {categoriaLinha ? (
+                          <>
+                            <optgroup label={`Categoria ${categoriaLinha}`}>{opcoes(prioritarios)}</optgroup>
+                            {restantes.length > 0 && (
+                              <optgroup label="Outras categorias">{opcoes(restantes)}</optgroup>
+                            )}
+                          </>
+                        ) : (
+                          opcoes(prioritarios)
+                        )}
                       </select>
                     </td>
                     <td>
@@ -254,13 +297,22 @@ export function EntregaCard({ entrega, indice, total, base, dispatch }: Props) {
                       />
                     </td>
                     <td>
-                      <CampoNumero
-                        className="num"
-                        inputMode="decimal"
-                        nome={`Peso unitário — ${nome}`}
-                        valor={produto.peso}
-                        onValor={(valor) => campoProduto(produto, 'peso', valor)}
-                      />
+                      {/* O servidor usa o peso do catálogo quando o código existe (qtd ×
+                          peso), então a linha mostra esse valor em vez de aceitar um
+                          número que o PDF ignoraria. Fora do catálogo, o peso é editável. */}
+                      {catalogo ? (
+                        <span className="fixo num" title="Peso do catálogo — não editável">
+                          {String(catalogo.peso).replace('.', ',')}
+                        </span>
+                      ) : (
+                        <CampoNumero
+                          className="num"
+                          inputMode="decimal"
+                          nome={`Peso unitário — ${nome}`}
+                          valor={produto.peso}
+                          onValor={(valor) => campoProduto(produto, 'peso', valor)}
+                        />
+                      )}
                     </td>
                     <td>
                       <CampoNumero

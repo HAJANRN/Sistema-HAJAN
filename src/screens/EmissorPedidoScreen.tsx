@@ -34,6 +34,31 @@ export function EmissorPedidoScreen() {
 
   const carregar = useCallback(() => setTentativa((n) => n + 1), []);
 
+  /**
+   * "Novo pedido" relê a base antes de reabrir o formulário: o número sugerido é o
+   * maior do histórico + 1, que mudou com a emissão. Reaproveitar o número antigo faria
+   * o INSERT OR REPLACE do servidor sobrescrever histórico, clone e PDF do pedido
+   * recém-emitido. Se a releitura falhar, o resultado na tela é mantido e o motivo é
+   * devolvido para o cartão de geração — o operador tenta de novo com o mesmo botão.
+   */
+  const iniciarNovo = useCallback(async (numeroEmitido: string): Promise<string | null> => {
+    try {
+      const dados = await api.emissorBase();
+      // Pedido sem PÇS/CXS não entra no histórico, então MAX(numero) não avança: sem
+      // este piso o próximo pedido nasceria com o mesmo número e apagaria o clone.
+      const sugerido = Math.max(
+        Number(dados.proximoNumero) || 0,
+        (Number(numeroEmitido) || 0) + 1,
+      );
+      setBase({ ...dados, proximoNumero: String(sugerido) });
+      setChave((n) => n + 1);
+      return null;
+    } catch (cause) {
+      const motivo = cause instanceof Error ? cause.message : 'sem resposta do servidor';
+      return `O pedido ${numeroEmitido} já foi emitido e gravado, mas não consegui reler a base para o próximo número (${motivo}). Clique em "Novo pedido" de novo.`;
+    }
+  }, []);
+
   if (erro) {
     return (
       <section className="emissor-screen">
@@ -55,10 +80,16 @@ export function EmissorPedidoScreen() {
     );
   }
 
-  return <Formulario key={chave} base={base} onNovo={() => setChave((n) => n + 1)} />;
+  return <Formulario key={chave} base={base} onNovo={iniciarNovo} />;
 }
 
-function Formulario({ base, onNovo }: { base: BaseEmissor; onNovo: () => void }) {
+function Formulario({
+  base,
+  onNovo,
+}: {
+  base: BaseEmissor;
+  onNovo: (numeroEmitido: string) => Promise<string | null>;
+}) {
   const [estado, dispatch] = useReducer(reduzir, base, estadoInicial);
 
   return (
