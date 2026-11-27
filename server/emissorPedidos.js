@@ -1,6 +1,7 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
-import { DB_FILE } from './config.js';
+import { CLONES_DIR, DB_FILE } from './config.js';
 import { ler, responderSemBanco } from './emissorBanco.js';
 import { carteira } from './emissorCarteira.js';
 
@@ -67,5 +68,51 @@ router.get('/carteira', (req, res) => {
     // o detalhe pode conter caminho do SMB: fica no log do servidor, não na resposta
     console.error('não consegui ler a carteira:', erro);
     res.status(500).json({ error: 'não consegui ler a carteira de crédito' });
+  }
+});
+
+/** Número só entra em nome de arquivo com estes caracteres. */
+function nomeSeguro(texto) {
+  const nome = String(texto ?? '').trim();
+  return /^[A-Za-z0-9._-]{1,40}$/.test(nome) ? nome : null;
+}
+
+router.get('/clones/:numero', (req, res) => {
+  const numero = nomeSeguro(req.params.numero);
+  if (!numero) return res.status(400).json({ error: 'número de pedido inválido' });
+  const tipo = String(req.query.tipo ?? '').toUpperCase();
+  try {
+    const db = ler();
+    const registro = db
+      .prepare('SELECT payload FROM emissor_pedidos_clonagem WHERE numero = ?')
+      .get(numero);
+    if (registro) {
+      return res.json({ encontrado: true, fonte: 'banco', payload: JSON.parse(registro.payload) });
+    }
+
+    const arquivo = path.join(CLONES_DIR, `${numero}.json`);
+    if (fs.existsSync(arquivo)) {
+      try {
+        return res.json({
+          encontrado: true,
+          fonte: 'rede',
+          payload: JSON.parse(fs.readFileSync(arquivo, 'utf8')),
+        });
+      } catch {
+        // JSON corrompido na rede: segue para o histórico
+      }
+    }
+
+    const categorias = db
+      .prepare('SELECT DISTINCT categoria FROM emissor_pedidos_semana WHERE numero = ?')
+      .all(numero)
+      .map((linha) => linha.categoria);
+    const outro = tipo === 'CXS' ? 'PÇS' : 'CXS';
+    if (tipo && categorias.includes(outro) && !categorias.includes(tipo)) {
+      return res.json({ encontrado: false, outroTipo: outro });
+    }
+    res.json({ encontrado: false });
+  } catch (erro) {
+    responderSemBanco(res, erro);
   }
 });
