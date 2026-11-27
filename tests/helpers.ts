@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 
@@ -21,8 +22,26 @@ export interface Api {
 }
 
 /**
+ * Snapshot consistente de um banco SQLite, mesmo em WAL.
+ * Copiar só o `.db` perderia as transações ainda não checkpointadas (o `-wal` do
+ * `data/hajan.db` tem vários MB). `VACUUM INTO` lê pela conexão somente-leitura,
+ * então enxerga o WAL, e escreve um banco novo e compacto sem tocar no original.
+ */
+export function copiarBanco(origem: string, destino: string): void {
+  const leitor = new DatabaseSync(origem, { readOnly: true });
+  try {
+    leitor.exec(`VACUUM INTO '${destino.replaceAll("'", "''")}'`);
+  } finally {
+    leitor.close();
+  }
+}
+
+/**
  * Sobe os routers do emissor numa cópia temporária do banco.
  * A config é lida no import; por isso os env vars são definidos antes do import dinâmico.
+ * Um mount por processo: o `node --test` roda um processo por arquivo e `config.js`
+ * congela `FRIBOI_DB` no import — chamar `montarApi()` duas vezes no mesmo arquivo
+ * devolveria sempre o primeiro banco temporário.
  */
 export async function montarApi(): Promise<Api> {
   const origem = path.join(RAIZ, 'data', 'hajan.db');
@@ -30,7 +49,7 @@ export async function montarApi(): Promise<Api> {
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hajan-teste-'));
   const db = path.join(dir, 'hajan.db');
-  fs.copyFileSync(origem, db);
+  copiarBanco(origem, db);
   const pdfs = path.join(dir, 'pdfs');
   const clones = path.join(dir, 'clones');
   const carteira = path.join(dir, 'carteira');
