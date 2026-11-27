@@ -27,3 +27,6 @@ secrets/*
 *.exe
 app.py.backup-*
 *.bat.backup*
+hajan.env
+firebase-*.json
+*-firebase-adminsdk-*.json

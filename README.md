@@ -28,6 +28,23 @@ O pedido é montado na tela e finalizado em **Gerar pedido**. O PDF é produzido
 
 O sistema é feito para uso interno e trabalha apenas com dados comerciais da empresa e de seus clientes.
 
+## Armazenamento no Firebase
+
+PDFs dos pedidos, dados de clonagem, carteira de crédito e média de compras ficam no Firebase (projeto `sistema-hajan`), sem depender das pastas `D:\` e `S:\`.
+
+| Onde | O quê |
+| --- | --- |
+| Storage `pedidos/pdf/` | PDFs gerados |
+| Storage `credito/carteira/` | Planilhas CARTEIRA DE TERCEIRO, enviadas em **Atualizar base local › Crédito no Firebase** |
+| Storage `credito/decisao_credito.json` | Média de compras, enviada na mesma tela |
+| Firestore `pedidos_clonagem` | Um documento por pedido, para clonar pelo número |
+
+**Configuração no Windows:** copie `hajan.env.example` para `hajan.env` ao lado do `app.py` e informe o caminho do `.json` da conta de serviço em `FIREBASE_CREDENTIALS`. O `hajan.env` e a chave nunca vão para o repositório.
+
+**Configuração no servidor:** defina `FIREBASE_STORAGE_BUCKET` e `FIREBASE_PROJECT_ID` no `.env` e salve a chave em `secrets/firebase-conta-servico.json`.
+
+Pastas locais continuam opcionais: `HAJAN_PDF_DIR`, `HAJAN_PDF_SHARED_DIR`, `HAJAN_CLONES_DIR`, `FRIBOI_CARTEIRA_DIR` e `FRIBOI_CREDITO_JSON` só são usadas quando definidas.
+
 ## Atualizações
 
 O histórico de versões e o que mudou em cada atualização ficam em [ATUALIZACOES.md](ATUALIZACOES.md).

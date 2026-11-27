@@ -14,12 +14,16 @@ services:
       FRIBOI_CREDITO_JSON: ${FRIBOI_CREDITO_JSON:-/data/import/decisao_credito.json}
       FRIBOI_USUARIO: ${FRIBOI_USUARIO:?Defina FRIBOI_USUARIO no arquivo .env}
       FRIBOI_SENHA_ARQUIVO: /run/secrets/senha-compartilhada
+      FIREBASE_STORAGE_BUCKET: ${FIREBASE_STORAGE_BUCKET:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_CREDENTIALS: /run/secrets/firebase-conta-servico
     ports:
       - "127.0.0.1:8501:8501"
     volumes:
       - ./data:/data
     secrets:
       - senha-compartilhada
+      - firebase-conta-servico
     healthcheck:
       test:
         - CMD
@@ -34,3 +38,5 @@ services:
 secrets:
   senha-compartilhada:
     file: ./secrets/senha-admin.txt
+  firebase-conta-servico:
+    file: ./secrets/firebase-conta-servico.json
