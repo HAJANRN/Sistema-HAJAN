@@ -3,6 +3,7 @@ import ctypes
 import gc
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -21,10 +22,33 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
+import nuvem
+
 # fpdf, openpyxl e streamlit_sortables são importados sob demanda dentro das
 # funções que os usam, para não pagar o custo deles na abertura do app.
 
 APP_DIR = Path(__file__).resolve().parent
+
+
+def _carregar_hajan_env(arquivo):
+    # Configuração das máquinas Windows: um hajan.env ao lado do app.py com
+    # linhas CHAVE=valor. Variáveis já definidas no sistema têm prioridade.
+    try:
+        linhas = arquivo.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+    for linha in linhas:
+        linha = linha.strip()
+        if not linha or linha.startswith("#") or "=" not in linha:
+            continue
+        chave, valor = linha.split("=", 1)
+        chave = chave.strip()
+        valor = valor.strip().strip('"').strip("'")
+        if chave and chave not in os.environ:
+            os.environ[chave] = valor
+
+
+_carregar_hajan_env(Path(os.environ.get("HAJAN_ENV_FILE", APP_DIR / "hajan.env")))
 DATA_DIR = Path(os.environ.get("HAJAN_DATA_DIR", APP_DIR)).expanduser()
 DATABASE_PATH = Path(
     os.environ.get("HAJAN_DATABASE_PATH", DATA_DIR / "hajan_pedidos.db")
@@ -44,48 +68,41 @@ ARQUIVO_SENHA_COMPARTILHADA = Path(
     )
 )
 LOGO_PATH = APP_DIR / "unnamed.png"
-PASTA_PDFS = (
-    Path(os.environ.get("HAJAN_PDF_DIR", EXPORT_DIR / "pdf"))
-    if EXPORT_DIR
-    else Path(r"D:\Dados Hajan\pedidos fornecedores\FRIBOI e SEARA\Pedidos\FRIBOI\Pedidos Ped+")
-)
-# Segundo destino dos PDFs: pasta de rede, para quem usa o emissor pela rede
-# conseguir abrir o arquivo sem depender do disco da máquina que gerou.
-PASTA_PDFS_REDE = (
-    Path(os.environ.get("HAJAN_PDF_SHARED_DIR", EXPORT_DIR / "pdf"))
-    if EXPORT_DIR
-    else Path(r"S:\FRIBOI\zzz Gestão Pedidos\Pedidos Ped+")
-)
-PASTAS_PDFS = tuple(dict.fromkeys((PASTA_PDFS, PASTA_PDFS_REDE)))
-# Índice de clonagem na pasta compartilhada: um .json por pedido, ao lado dos
-# PDFs, para qualquer máquina clonar pedidos gerados em outra instância.
-PASTA_CLONES_REDE = Path(
-    os.environ.get(
-        "HAJAN_CLONES_DIR",
-        EXPORT_DIR / "clones" if EXPORT_DIR else PASTA_PDFS_REDE / "_clone_data",
+
+
+def _pasta_ambiente(variavel, padrao=None):
+    valor = os.environ.get(variavel)
+    if valor:
+        return Path(valor).expanduser()
+    return padrao
+
+
+# Os arquivos do sistema (PDFs, clonagem, carteira de crédito e média de
+# compras) ficam no Firebase; veja nuvem.py. Pastas locais são opcionais e só
+# são usadas quando a variável correspondente estiver definida.
+PASTAS_PDFS = tuple(
+    dict.fromkeys(
+        pasta
+        for pasta in (
+            _pasta_ambiente("HAJAN_PDF_DIR", EXPORT_DIR / "pdf" if EXPORT_DIR else None),
+            _pasta_ambiente("HAJAN_PDF_SHARED_DIR"),
+        )
+        if pasta is not None
     )
+)
+PASTA_CLONES_REDE = _pasta_ambiente(
+    "HAJAN_CLONES_DIR", EXPORT_DIR / "clones" if EXPORT_DIR else None
 )
 # Carteira de Terceiro: as divisões exportadas no mesmo dia repetem o registro
 # consolidado; a mais recente é a fonte dos limites e saldos do pedido.
-PASTA_CARTEIRA_CREDITO = Path(
-    os.environ.get(
-        "FRIBOI_CARTEIRA_DIR",
-        Path(r"S:\FRIBOI\financeiro\carteira clientes"),
-    )
-).expanduser()
+PASTA_CARTEIRA_CREDITO = _pasta_ambiente("FRIBOI_CARTEIRA_DIR")
 # Média mensal de compras (6 meses) calculada pela análise de crédito; quando
 # o arquivo não existe, a regra de atenção é apenas omitida.
 ARQUIVOS_MEDIA_COMPRAS = tuple(
     caminho
     for caminho in (
-        Path(os.environ["FRIBOI_CREDITO_JSON"])
-        if os.environ.get("FRIBOI_CREDITO_JSON")
-        else None,
+        _pasta_ambiente("FRIBOI_CREDITO_JSON"),
         APP_DIR / "credito" / "decisao_credito.json",
-        Path(
-            r"C:\Users\Trabalho2024\Documents\Qoder\2026-10-31\9097f397"
-            r"\credito\decisao_credito.json"
-        ),
     )
     if caminho is not None
 )
@@ -208,7 +225,7 @@ def _cabecalho_marca(clientes, produtos):
             '<div class="masthead-titulo">Emissor de pedidos'
             '<span>HAJAN · JBS / Friboi</span></div></div>'
             f'<div class="masthead-meta">{clientes} clientes · {produtos} produtos'
-            f'<span>{"base persistente" if EXPORT_DIR else "base local"}</span></div></div>',
+            f'<span>{"Firebase" if nuvem.configurado() else ("base persistente" if EXPORT_DIR else "base local")}</span></div></div>',
             unsafe_allow_html=True,
         )
     with col_sair:
@@ -1372,39 +1389,56 @@ def _memo_carteira_credito():
     return {"momento": 0.0, "assinatura": ()}
 
 
+def _arquivos_carteira_credito():
+    # Retorna (origem, caminho, instante, tamanho) de cada planilha encontrada,
+    # no Firebase e, se configurada, na pasta local.
+    arquivos = []
+    for caminho, instante, tamanho in nuvem.listar(nuvem.PREFIXO_CARTEIRA):
+        arquivos.append(("firebase", caminho, instante, tamanho))
+    if PASTA_CARTEIRA_CREDITO is not None:
+        try:
+            for arquivo in PASTA_CARTEIRA_CREDITO.glob("CARTEIRA DE TERCEIRO*.xlsx"):
+                info = arquivo.stat()
+                arquivos.append(("local", str(arquivo), info.st_mtime, info.st_size))
+        except OSError:
+            logging.exception("Falha ao listar a carteira em %s", PASTA_CARTEIRA_CREDITO)
+    return [
+        item
+        for item in arquivos
+        if Path(item[1]).name.upper().startswith("CARTEIRA DE TERCEIRO")
+        and Path(item[1]).suffix.lower() == ".xlsx"
+        and not Path(item[1]).name.startswith("~$")
+    ]
+
+
 def _assinatura_carteira_credito():
     memo = _memo_carteira_credito()
     agora = time.monotonic()
     if memo["assinatura"] and agora - memo["momento"] < 60.0:
         return memo["assinatura"]
 
-    try:
-        arquivos = [
-            arquivo
-            for arquivo in PASTA_CARTEIRA_CREDITO.glob("CARTEIRA DE TERCEIRO*.xlsx")
-            if not arquivo.name.startswith("~$")
-        ]
-    except OSError:
-        return memo["assinatura"]
-
     por_data = {}
-    for arquivo in arquivos:
-        data_arquivo = _data_do_nome_carteira(arquivo.name)
+    for item in _arquivos_carteira_credito():
+        data_arquivo = _data_do_nome_carteira(Path(item[1]).name)
         if data_arquivo:
-            por_data.setdefault(data_arquivo, []).append(arquivo)
+            por_data.setdefault(data_arquivo, {})[Path(item[1]).name] = item
     if not por_data:
         return memo["assinatura"]
 
-    assinatura = []
-    for arquivo in sorted(por_data[max(por_data)]):
-        try:
-            info = arquivo.stat()
-        except OSError:
-            continue
-        assinatura.append((arquivo.name, info.st_mtime_ns, info.st_size))
-    memo["assinatura"] = tuple(assinatura)
+    # O mesmo nome no Firebase e na pasta local conta uma vez só.
+    memo["assinatura"] = tuple(sorted(por_data[max(por_data)].values(), key=lambda i: i[1]))
     memo["momento"] = agora
     return memo["assinatura"]
+
+
+def _ler_arquivo_origem(origem, caminho):
+    if origem == "firebase":
+        return nuvem.ler_arquivo(caminho)
+    try:
+        return Path(caminho).read_bytes()
+    except OSError:
+        logging.exception("Falha ao ler %s", caminho)
+        return None
 
 
 def _codigo_planilha(valor):
@@ -1430,14 +1464,17 @@ def _carregar_carteira_credito(assinatura):
 
     registros = {}
     data_referencia = ""
-    for nome_arquivo, _mtime, _tamanho in assinatura:
+    for origem, caminho_arquivo, _instante, _tamanho in assinatura:
         if not data_referencia:
-            data_arquivo = _data_do_nome_carteira(nome_arquivo)
+            data_arquivo = _data_do_nome_carteira(Path(caminho_arquivo).name)
             if data_arquivo:
                 data_referencia = data_arquivo.strftime("%d/%m/%Y")
+        conteudo = _ler_arquivo_origem(origem, caminho_arquivo)
+        if not conteudo:
+            continue
         try:
             wb = openpyxl.load_workbook(
-                PASTA_CARTEIRA_CREDITO / nome_arquivo, read_only=True, data_only=True
+                io.BytesIO(conteudo), read_only=True, data_only=True
             )
         except Exception:
             continue
@@ -1516,13 +1553,33 @@ def _carregar_carteira_credito(assinatura):
     return {"registros": consolidado, "data": data_referencia}
 
 
+@st.cache_resource(show_spinner=False, max_entries=1)
+def _memo_media_compras():
+    return {"momento": 0.0, "assinatura": ()}
+
+
 def _assinatura_media_compras():
+    # Mesma ideia da carteira: o arquivo muda raramente, então a consulta ao
+    # Firebase é feita no máximo a cada 60 segundos.
+    memo = _memo_media_compras()
+    agora = time.monotonic()
+    if memo["momento"] and agora - memo["momento"] < 60.0:
+        return memo["assinatura"]
+    memo["assinatura"] = _consultar_media_compras()
+    memo["momento"] = agora
+    return memo["assinatura"]
+
+
+def _consultar_media_compras():
+    info = nuvem.info_arquivo(nuvem.CAMINHO_MEDIA_COMPRAS)
+    if info:
+        return ("firebase", nuvem.CAMINHO_MEDIA_COMPRAS, *info)
     for caminho in ARQUIVOS_MEDIA_COMPRAS:
         try:
             info = caminho.stat()
         except OSError:
             continue
-        return (str(caminho), info.st_mtime_ns, info.st_size)
+        return ("local", str(caminho), info.st_mtime_ns, info.st_size)
     return ()
 
 
@@ -1530,10 +1587,12 @@ def _assinatura_media_compras():
 def _carregar_media_compras(assinatura):
     if not assinatura:
         return {}
+    conteudo = _ler_arquivo_origem(assinatura[0], assinatura[1])
+    if not conteudo:
+        return {}
     try:
-        with open(assinatura[0], encoding="utf-8") as arquivo:
-            dados = json.load(arquivo)
-    except (OSError, ValueError):
+        dados = json.loads(conteudo.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError):
         return {}
 
     medias = {}
@@ -1757,6 +1816,8 @@ def salvar_registros_semana(registros, substituir=True):
 
 
 def _caminho_clone_rede(numero):
+    if PASTA_CLONES_REDE is None:
+        return None
     return PASTA_CLONES_REDE / f"{nome_seguro_arquivo(numero)}.json"
 
 
@@ -1797,8 +1858,12 @@ def registrar_pedido_clonagem(numero, atencao, local, unidade, observacao,
             gravou = True
         except sqlite3.Error:
             logging.exception("Falha ao guardar o pedido nº %s para clonagem", numero)
+    if nuvem.salvar_clone(nome_seguro_arquivo(numero), dados):
+        gravou = True
+    destino = _caminho_clone_rede(numero)
+    if destino is None:
+        return gravou
     try:
-        destino = _caminho_clone_rede(numero)
         destino.parent.mkdir(parents=True, exist_ok=True)
         temporario = destino.with_name(f".{destino.name}.{uuid4().hex}.tmp")
         try:
@@ -1833,7 +1898,12 @@ def _carregar_clone_banco(numero):
 
 
 def _carregar_clone_rede(numero):
+    dados = nuvem.ler_clone(nome_seguro_arquivo(numero))
+    if dados:
+        return dados
     caminho = _caminho_clone_rede(numero)
+    if caminho is None:
+        return None
     try:
         if not caminho.is_file():
             return None
@@ -1967,8 +2037,7 @@ def _pdf_linhas_conteudo(conteudo):
     return resultado
 
 
-def _pdf_linhas(caminho):
-    dados = caminho.read_bytes()
+def _pdf_linhas(dados):
     linhas = []
     for achado in re.finditer(rb"stream\r?\n(.*?)endstream", dados, re.S):
         bruto = achado.group(1)
@@ -1984,29 +2053,39 @@ def _pdf_linhas(caminho):
 
 
 def _pdf_do_numero(numero, categoria=None):
+    """Conteúdo do PDF mais recente do pedido, no Firebase ou nas pastas locais."""
     padrao = re.compile(
         rf"^Pedido HAJAN\b.*?n[ºo°]\s*{re.escape(numero)}(?!\d)", re.IGNORECASE
     )
     # O mesmo número pode ter um PDF CXS e outro PÇS; o tipo escolhido desempata.
     tipo = normalizar_busca(categoria).upper() if categoria else ""
+
+    def serve(nome):
+        if not nome.lower().endswith(".pdf") or not padrao.match(nome):
+            return False
+        return not tipo or tipo in normalizar_busca(nome).upper()
+
     melhor = None
+    for caminho, instante, _tamanho in nuvem.listar(nuvem.PREFIXO_PDFS):
+        if serve(Path(caminho).name) and (melhor is None or instante > melhor[0]):
+            melhor = (instante, "firebase", caminho)
     for pasta in PASTAS_PDFS:
         try:
             nomes = [pasta / nome for nome in os.listdir(pasta)]
         except OSError:
             continue
         for caminho in nomes:
-            if caminho.suffix.lower() != ".pdf" or not padrao.match(caminho.name):
-                continue
-            if tipo and tipo not in normalizar_busca(caminho.name).upper():
+            if not serve(caminho.name):
                 continue
             try:
                 instante = caminho.stat().st_mtime
             except OSError:
                 continue
             if melhor is None or instante > melhor[0]:
-                melhor = (instante, caminho)
-    return melhor[1] if melhor else None
+                melhor = (instante, "local", str(caminho))
+    if melhor is None:
+        return None
+    return _ler_arquivo_origem(melhor[1], melhor[2])
 
 
 def _data_pdf(texto):
@@ -2122,12 +2201,12 @@ def _observacao_pdf(linhas):
 
 
 def _clone_de_pdf(numero, categoria=None):
-    caminho = _pdf_do_numero(numero, categoria)
-    if not caminho:
+    conteudo = _pdf_do_numero(numero, categoria)
+    if not conteudo:
         return None
     try:
-        linhas = _pdf_linhas(caminho)
-    except OSError:
+        linhas = _pdf_linhas(conteudo)
+    except (OSError, ValueError):
         logging.exception("Falha ao ler o PDF do pedido nº %s", numero)
         return None
 
@@ -3303,13 +3382,24 @@ def _tarefa_pdf_worker(numero, atencao, data_pedido, local, entregas, unidade,
     )
     caminhos = []
     erro_salvar = False
-    if os.name == "nt" or EXPORT_DIR:
-        for pasta in PASTAS_PDFS:
-            try:
-                caminhos.append(str(salvar_pdf_local(pdf_bytes, nome_arquivo, pasta)))
-            except OSError:
-                logging.exception("Falha ao salvar PDF em %s", pasta)
-                erro_salvar = True
+    if nuvem.configurado():
+        try:
+            caminhos.append(
+                nuvem.salvar_arquivo(
+                    nuvem.PREFIXO_PDFS + nome_seguro_arquivo(nome_arquivo),
+                    pdf_bytes,
+                    "application/pdf",
+                )
+            )
+        except OSError:
+            logging.exception("Falha ao salvar o PDF no Firebase")
+            erro_salvar = True
+    for pasta in PASTAS_PDFS:
+        try:
+            caminhos.append(str(salvar_pdf_local(pdf_bytes, nome_arquivo, pasta)))
+        except OSError:
+            logging.exception("Falha ao salvar PDF em %s", pasta)
+            erro_salvar = True
     return {
         "pdf": pdf_bytes,
         "nome": nome_arquivo,
@@ -3408,14 +3498,10 @@ if resultado_pdf and resultado_pdf["assinatura"] == assinatura_pdf:
             st.success(f"PDF salvo em:  \n{salvo}")
     elif resultado_pdf["erro_salvar"]:
         st.warning("Não foi possível salvar nas pastas configuradas. Baixe o PDF pelo botão abaixo.")
-    elif os.name != "nt" and not EXPORT_DIR:
+    elif not nuvem.configurado() and not PASTAS_PDFS:
         st.info(
-            "O salvamento automático não está configurado. Baixe o arquivo abaixo."
-        )
-    elif EXPORT_DIR and not resultado_pdf["caminhos"]:
-        st.warning(
-            "Não foi possível salvar o PDF no armazenamento persistente configurado. "
-            "Baixe o arquivo pelo botão abaixo."
+            "O Firebase não está configurado, então o PDF não foi arquivado. "
+            "Baixe o arquivo abaixo."
         )
     st.download_button(
         label="⬇️ Clique aqui para baixar o PDF",
@@ -3510,34 +3596,34 @@ if "_versao_upload_dados" not in st.session_state:
     st.session_state._versao_upload_dados = 0
 
 with st.expander(
-    "Atualizar base local",
+    "Importar dados",
     expanded="_resultado_atualizacao_dados" in st.session_state,
 ):
-    st.caption("Envie somente as planilhas alteradas. Cada arquivo atualiza sua tabela correspondente.")
+    st.caption("Envie somente os dados alterados. Cada arquivo atualiza sua tabela correspondente.")
     versao_upload = st.session_state._versao_upload_dados
     col_upload_clientes, col_upload_produtos = st.columns(2)
     with col_upload_clientes:
         arquivo_clientes = st.file_uploader(
-            "Planilha de clientes",
+            "Dados de clientes",
             type=["xlsx"],
             key=f"upload_clientes_{versao_upload}",
         )
     with col_upload_produtos:
         arquivo_produtos = st.file_uploader(
-            "Planilha de produtos",
+            "Dados de produtos",
             type=["xlsx"],
             key=f"upload_produtos_{versao_upload}",
         )
     col_upload_limites, col_upload_unidades = st.columns(2)
     with col_upload_limites:
         arquivo_limites = st.file_uploader(
-            "Planilha de limites",
+            "Dados de limites",
             type=["xlsx"],
             key=f"upload_limites_{versao_upload}",
         )
     with col_upload_unidades:
         arquivo_unidades = st.file_uploader(
-            "Planilha de unidades",
+            "Dados de unidades",
             type=["xlsx"],
             key=f"upload_unidades_{versao_upload}",
         )
@@ -3561,6 +3647,80 @@ with st.expander(
 
     if tarefa_em_andamento("atualizacao"):
         _acompanhar_atualizacao()
+
+    st.markdown("**Crédito no Firebase**")
+    if not nuvem.configurado():
+        st.caption(
+            "O Firebase não está configurado. Defina FIREBASE_STORAGE_BUCKET e a "
+            "credencial da conta de serviço para enviar a carteira e a média de compras."
+        )
+    else:
+        st.caption(
+            "Envie as planilhas CARTEIRA DE TERCEIRO do dia e, quando mudar, o "
+            "decisao_credito.json. O sistema usa sempre a carteira mais recente."
+        )
+        col_upload_carteira, col_upload_media = st.columns(2)
+        with col_upload_carteira:
+            arquivos_carteira = st.file_uploader(
+                "Carteira de crédito",
+                type=["xlsx"],
+                accept_multiple_files=True,
+                key=f"upload_carteira_{versao_upload}",
+            )
+        with col_upload_media:
+            arquivo_media = st.file_uploader(
+                "Média de compras (decisao_credito.json)",
+                type=["json"],
+                key=f"upload_media_{versao_upload}",
+            )
+        if st.button(
+            "Enviar para o Firebase",
+            key=f"enviar_credito_{versao_upload}",
+            disabled=not (arquivos_carteira or arquivo_media),
+        ):
+            enviados, falhas = [], []
+            for arquivo in arquivos_carteira or []:
+                nome = nome_seguro_arquivo(arquivo.name)
+                if not nome.upper().startswith("CARTEIRA DE TERCEIRO") or not _data_do_nome_carteira(nome):
+                    falhas.append(f"{arquivo.name} (o nome precisa ser CARTEIRA DE TERCEIRO com a data)")
+                    continue
+                try:
+                    nuvem.salvar_arquivo(
+                        nuvem.PREFIXO_CARTEIRA + nome,
+                        arquivo.getvalue(),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                    enviados.append(nome)
+                except OSError:
+                    logging.exception("Falha ao enviar %s ao Firebase", nome)
+                    falhas.append(arquivo.name)
+            if arquivo_media:
+                try:
+                    json.loads(arquivo_media.getvalue().decode("utf-8-sig"))
+                    nuvem.salvar_arquivo(
+                        nuvem.CAMINHO_MEDIA_COMPRAS,
+                        arquivo_media.getvalue(),
+                        "application/json",
+                    )
+                    enviados.append(arquivo_media.name)
+                except (UnicodeDecodeError, ValueError):
+                    falhas.append(f"{arquivo_media.name} (JSON inválido)")
+                except OSError:
+                    logging.exception("Falha ao enviar a média de compras ao Firebase")
+                    falhas.append(arquivo_media.name)
+            # Força a próxima leitura a buscar os arquivos novos.
+            _memo_carteira_credito()["momento"] = 0.0
+            _memo_carteira_credito()["assinatura"] = ()
+            _memo_media_compras()["momento"] = 0.0
+            if falhas and not enviados:
+                st.warning("Não enviei: " + "; ".join(falhas))
+            if enviados:
+                st.session_state._resultado_atualizacao_dados = (
+                    "Enviado ao Firebase: " + ", ".join(enviados) + "."
+                    + (" Não enviei: " + "; ".join(falhas) + "." if falhas else "")
+                )
+                st.session_state._versao_upload_dados += 1
+                st.rerun()
 
     if "_resultado_atualizacao_dados" in st.session_state:
         st.success(st.session_state.pop("_resultado_atualizacao_dados"))

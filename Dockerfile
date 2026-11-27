@@ -13,7 +13,7 @@ RUN groupadd --system --gid 10001 hajan \
 
 WORKDIR /app
 
-COPY requirements.txt app.py setup_db.py unnamed.png ./
+COPY requirements.txt app.py nuvem.py setup_db.py unnamed.png ./
 COPY .streamlit/config.toml ./.streamlit/config.toml
 COPY docker/entrypoint.sh /usr/local/bin/hajan-entrypoint
 

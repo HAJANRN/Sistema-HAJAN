@@ -21,3 +21,6 @@ node_modules/
 dist/
 logs/
 *.pyc
+hajan.env
+firebase-*.json
+*-firebase-adminsdk-*.json
