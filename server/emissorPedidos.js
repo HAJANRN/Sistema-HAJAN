@@ -7,6 +7,20 @@ import { carteira } from './emissorCarteira.js';
 
 export const router = express.Router();
 
+/**
+ * Banco fora do ar vira 503 amigável (`responderSemBanco`); qualquer outro erro fica só no log
+ * do servidor e vira JSON genérico — a página HTML do Express mostraria stack e caminho
+ * absoluto. `mensagem` é o único texto que chega ao cliente; o detalhe pode conter caminho do SMB.
+ */
+function responderErro(res, erro, mensagem) {
+  try {
+    responderSemBanco(res, erro);
+  } catch {
+    console.error(`${mensagem}:`, erro);
+    if (!res.headersSent) res.status(500).json({ error: mensagem });
+  }
+}
+
 router.get('/base', (req, res) => {
   try {
     const db = ler();
@@ -57,7 +71,7 @@ router.get('/base', (req, res) => {
       destinos,
     });
   } catch (erro) {
-    responderSemBanco(res, erro);
+    responderErro(res, erro, 'não consegui ler a base do emissor');
   }
 });
 
@@ -65,9 +79,7 @@ router.get('/carteira', (req, res) => {
   try {
     res.json(carteira());
   } catch (erro) {
-    // o detalhe pode conter caminho do SMB: fica no log do servidor, não na resposta
-    console.error('não consegui ler a carteira:', erro);
-    res.status(500).json({ error: 'não consegui ler a carteira de crédito' });
+    responderErro(res, erro, 'não consegui ler a carteira de crédito');
   }
 });
 
@@ -75,19 +87,6 @@ router.get('/carteira', (req, res) => {
 function nomeSeguro(texto) {
   const nome = String(texto ?? '').trim();
   return /^[A-Za-z0-9._-]{1,40}$/.test(nome) ? nome : null;
-}
-
-/**
- * Banco fora do ar vira 503 amigável (`responderSemBanco`); qualquer outro erro fica no log
- * e vira JSON genérico — a página HTML do Express mostraria stack e caminho absoluto.
- */
-function responderErroClone(res, erro) {
-  try {
-    responderSemBanco(res, erro);
-  } catch {
-    console.error('não consegui ler o clone do pedido:', erro);
-    if (!res.headersSent) res.status(500).json({ error: 'não consegui ler o clone do pedido' });
-  }
 }
 
 router.get('/clones/:numero', (req, res) => {
@@ -133,6 +132,6 @@ router.get('/clones/:numero', (req, res) => {
     }
     res.json({ encontrado: false });
   } catch (erro) {
-    responderErroClone(res, erro);
+    responderErro(res, erro, 'não consegui ler o clone do pedido');
   }
 });

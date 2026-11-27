@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import { after, test } from 'node:test';
 import { montarApi } from './helpers.ts';
 
@@ -31,4 +32,21 @@ test('base traz clientes com limite e produtos com rótulo', async () => {
   // como o `set` do legado: destino repetido (cliente homônimo, "SEM DESTINO" na base) não duplica
   assert.equal(new Set(base.destinos).size, base.destinos.length);
   assert.equal(base.destinos.filter((destino: string) => destino === 'SEM DESTINO').length, 1);
+});
+
+// último teste do arquivo: altera o schema da cópia temporária do banco
+test('erro inesperado responde JSON genérico, sem caminho absoluto', async () => {
+  // coluna usada pela rota base renomeada: `prepare()` lança `no such column`, que não é
+  // "banco indisponível" e por isso cai no fallback (antes virava a página HTML do Express)
+  const db = new DatabaseSync(api.db);
+  db.exec('ALTER TABLE emissor_clientes RENAME COLUMN nome_formatado TO nome_formatado_renomeado');
+  db.close();
+
+  const resposta = await api.get('/api/emissor/base');
+  assert.equal(resposta.status, 500);
+  assert.match(resposta.headers.get('content-type') ?? '', /application\/json/);
+  const texto = await resposta.text();
+  assert.ok(!texto.includes('C:/'), `resposta vazou caminho absoluto: ${texto}`);
+  assert.ok(!texto.includes('C:\\'), `resposta vazou caminho absoluto: ${texto}`);
+  assert.deepEqual(JSON.parse(texto), { error: 'não consegui ler a base do emissor' });
 });
