@@ -14,7 +14,7 @@ import {
 } from './config.js';
 import {
   bloqueado,
-  conferirSenha,
+  conferirCredenciais,
   decidir,
   definirSenha,
   headerCookieAcesso,
@@ -25,12 +25,19 @@ import {
   registrarFalta,
   senhaDefinida,
   tokenOk,
+  usuarioOk,
 } from './acesso.js';
+import { router as emissorRouter } from './emissor.js';
+import { router as emissorPedidosRouter } from './emissorPedidos.js';
 import { getScanState, scanAll, startWatch } from './importer.js';
+import { getBillingState, startBillingWatch, syncBilling } from './billing.js';
 import {
   FolderUnavailable,
   attachmentRoot,
   flushQueue,
+  folderFor,
+  removeAttachment,
+  removeMissingAttachments,
   safeFileName,
   storeAttachment,
   storedPath,
@@ -41,6 +48,7 @@ import { fillMissingDistances } from './routing.js';
 import {
   REFUSAL_REASONS,
   STATUSES,
+  STATUSES_ACEITOS,
   distanceStats,
   getAttachment,
   getEtaSettings,
@@ -48,9 +56,12 @@ import {
   initStore,
   lastErrors,
   listOrders,
+  refreshAutoFields,
+  revisionNow,
   setEtaSettings,
   summary,
   updateDelivery,
+  updateOrderFields,
 } from './store.js';
 
 async function alreadyRunning() {
@@ -131,6 +142,13 @@ app.use('/api', (req, res, next) => {
       error: 'link de acompanhamento expirado — peça um novo ao escritório',
     });
   }
+  const rotasPublicas = new Set(['/health', '/sessao', '/entrada', '/saida']);
+  if (!rotasPublicas.has(req.path)) {
+    if (!senhaDefinida() && req.path === '/senha' && req.method === 'POST') return next();
+    if (!senhaDefinida() || decisao !== 'administracao') {
+      return res.status(401).json({ error: 'entre com usuário e senha para acessar o sistema' });
+    }
+  }
   const escreve = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
   if (escreve && ROTAS_ADMIN.has(req.path) && decisao !== 'administracao') {
     return res.status(403).json({ error: 'digite a senha do escritório para mexer aqui' });
@@ -139,7 +157,7 @@ app.use('/api', (req, res, next) => {
 });
 
 app.get('/api/sessao', (req, res) =>
-  res.json({ role: papel(req), senhaDefinida: senhaDefinida() }),
+  res.json({ role: papel(req), senhaDefinida: senhaDefinida(), revision: revisionNow() }),
 );
 
 /** Login da área administrativa: acerta a senha e recebe um cookie válido por ADMIN_HORAS. */
@@ -148,9 +166,9 @@ app.post('/api/entrada', (req, res) => {
   if (bloqueado(ip)) {
     return res.status(429).json({ error: 'muitas tentativas — espere 15 minutos' });
   }
-  if (!conferirSenha(req.body?.senha)) {
+  if (!conferirCredenciais(req.body?.usuario, req.body?.senha)) {
     registrarFalta(ip);
-    return res.status(403).json({ error: 'senha incorreta' });
+    return res.status(403).json({ error: 'usuário ou senha incorretos' });
   }
   limparFaltas(ip);
   res.set('Set-Cookie', headerCookieAdmin());
@@ -162,8 +180,17 @@ app.post('/api/saida', (req, res) => {
   res.json({ role: 'operacao' });
 });
 
+/** Emissor de pedidos: consulta das tabelas emissor_* do banco unificado. */
+app.use('/api/emissor', emissorRouter);
+
+/** Digitação de pedidos: base, carteira, clones, emissão e download do PDF (rotas novas, sem prefixo próprio). */
+app.use('/api/emissor', emissorPedidosRouter);
+
 /** Primeira vez define; depois disso só quem já está dentro troca a senha. */
 app.post('/api/senha', (req, res) => {
+  if (!senhaDefinida() && !usuarioOk(req.body?.usuario)) {
+    return res.status(403).json({ error: 'usuário incorreto' });
+  }
   try {
     definirSenha(req.body?.senha);
   } catch (error) {
@@ -201,6 +228,7 @@ app.get('/api/status', (req, res) => {
     attachmentRoot: attachmentRoot(),
     attachmentMaxBytes: ANEXO_MAX_BYTES,
     ...getScanState(),
+    billing: getBillingState(),
     ...summary(),
     ...distanceStats(),
     errors: lastErrors(),
@@ -233,7 +261,19 @@ app.get('/api/orders', (req, res) => {
   if ((from && !iso.test(from)) || (to && !iso.test(to))) {
     return res.status(400).json({ error: 'datas devem usar o formato AAAA-MM-DD' });
   }
-  res.json({ orders: listOrders({ from, to }).map(withEstimates) });
+  // arquivo apagado na pasta some da lista junto (no máximo uma conferência por minuto)
+  removeMissingAttachments();
+  // O conteúdo não mudou desde a última sincronização: evita serializar tudo de novo.
+  // O app só manda a revisão quando está pedindo a mesma janela de datas que já tem.
+  const known = Number(req.query.revision);
+  if (Number.isFinite(known) && known === revisionNow()) {
+    return res.json({ revision: known, unchanged: true });
+  }
+  const settings = getEtaSettings();
+  res.json({
+    revision: revisionNow(),
+    orders: listOrders({ from, to }).map((order) => withEstimates(order, settings)),
+  });
 });
 
 app.get('/api/orders/:id', (req, res) => {
@@ -242,19 +282,44 @@ app.get('/api/orders/:id', (req, res) => {
   res.json(withEstimates(order));
 });
 
+/** Placas e instrução filial: digitadas no acompanhamento, sem senha, como o status da entrega. */
+app.patch('/api/orders/:id', (req, res) => {
+  const { plates, branchInstruction } = req.body ?? {};
+  const optionalText = (value, max) =>
+    value === null || (typeof value === 'string' && value.length <= max);
+
+  if (plates !== undefined && !optionalText(plates, 80)) {
+    return res.status(400).json({ error: 'placas inválidas (até 80 caracteres)' });
+  }
+  if (branchInstruction !== undefined && !optionalText(branchInstruction, 500)) {
+    return res.status(400).json({ error: 'instrução filial inválida (até 500 caracteres)' });
+  }
+  if (plates === undefined && branchInstruction === undefined) {
+    return res.status(400).json({ error: 'nenhuma alteração informada' });
+  }
+
+  const updated = updateOrderFields(req.params.id, { plates, branchInstruction });
+  if (!updated) return res.status(404).json({ error: 'pedido não encontrado' });
+  res.json(updated);
+});
+
 app.patch('/api/orders/:id/deliveries/:seq', async (req, res) => {
   const seq = Number(req.params.seq);
   if (!Number.isInteger(seq)) return res.status(400).json({ error: 'seq inválido' });
 
-  const { status, note, scheduledAt, reason, resale, resaleDate } = req.body ?? {};
+  const { status, note, observation, scheduledAt, reason, resale, resaleDate, lombador } =
+    req.body ?? {};
   const iso = /^\d{4}-\d{2}-\d{2}$/;
   const optionalDate = (value) => value === null || (typeof value === 'string' && iso.test(value));
 
-  if (status !== undefined && !STATUSES.includes(status)) {
+  if (status !== undefined && !STATUSES_ACEITOS.includes(status)) {
     return res.status(400).json({ error: `status deve ser um de: ${STATUSES.join(', ')}` });
   }
   if (note != null && (typeof note !== 'string' || note.length > 500)) {
     return res.status(400).json({ error: 'observação inválida' });
+  }
+  if (observation != null && (typeof observation !== 'string' || observation.length > 500)) {
+    return res.status(400).json({ error: 'observação da entrega inválida' });
   }
   if (scheduledAt !== undefined && !optionalDate(scheduledAt)) {
     return res.status(400).json({ error: 'data do agendamento deve usar AAAA-MM-DD' });
@@ -268,8 +333,13 @@ app.patch('/api/orders/:id/deliveries/:seq', async (req, res) => {
   if (resaleDate !== undefined && !optionalDate(resaleDate)) {
     return res.status(400).json({ error: 'data da revenda deve usar AAAA-MM-DD' });
   }
+  if (lombador !== undefined && lombador !== null && typeof lombador !== 'boolean') {
+    return res.status(400).json({ error: 'lombador deve ser sim ou não' });
+  }
   if (
-    [status, note, scheduledAt, reason, resale, resaleDate].every((value) => value === undefined)
+    [status, note, observation, scheduledAt, reason, resale, resaleDate, lombador].every(
+      (value) => value === undefined,
+    )
   ) {
     return res.status(400).json({ error: 'nenhuma alteração informada' });
   }
@@ -277,14 +347,16 @@ app.patch('/api/orders/:id/deliveries/:seq', async (req, res) => {
   const updated = updateDelivery(req.params.id, seq, {
     status,
     note,
+    observation,
     scheduledAt,
     reason,
     resale,
     resaleDate,
+    lombador,
   });
   if (!updated) return res.status(404).json({ error: 'entrega não encontrada' });
 
-  if (updated.status === 'recusada') {
+  if (updated.status === 'recusado' || updated.reason) {
     const order = getOrder(req.params.id);
     const delivery = order.deliveries.find((row) => row.seq === seq);
     const summary = await writeSummary(order, delivery, delivery.attachments);
@@ -321,7 +393,10 @@ app.post(
       mime,
       buffer,
     });
-    const summary = await writeSummary(order, delivery, [...delivery.attachments, attachment]);
+    // relê para o resumo já sair com o arquivo recém-recebido na lista
+    const fresh = getOrder(req.params.id);
+    const updated = fresh.deliveries.find((row) => row.seq === seq);
+    const summary = await writeSummary(fresh, updated, updated.attachments);
     res.status(201).json({ attachment, summary });
   },
 );
@@ -335,6 +410,57 @@ app.get('/api/attachments/:id/raw', (req, res) => {
   res.set('Content-Type', item.mime ?? 'application/octet-stream');
   res.set('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(item.name)}`);
   fs.createReadStream(file).pipe(res);
+});
+
+app.delete('/api/attachments/:id', async (req, res) => {
+  const item = getAttachment(req.params.id);
+  if (!item) return res.status(404).json({ error: 'anexo não encontrado' });
+  if (item.kind === 'resumo')
+    return res.status(400).json({ error: 'o resumo da anomalia é gerado automaticamente' });
+
+  const removed = removeAttachment(item.id);
+  if (!removed) return res.status(404).json({ error: 'anexo não encontrado' });
+
+  const order = getOrder(item.orderId);
+  const delivery = order?.deliveries.find((row) => row.seq === item.seq);
+  if (order && delivery?.reason) {
+    const summary = await writeSummary(order, delivery, delivery.attachments);
+    return res.json({ removed: true, summary });
+  }
+  res.json({ removed: true });
+});
+
+app.post('/api/orders/:id/deliveries/:seq/anomalia/salvar', async (req, res) => {
+  const seq = Number(req.params.seq);
+  if (!Number.isInteger(seq)) return res.status(400).json({ error: 'seq inválido' });
+
+  const order = getOrder(req.params.id);
+  if (!order) return res.status(404).json({ error: 'pedido não encontrado' });
+  const delivery = order.deliveries.find((row) => row.seq === seq);
+  if (!delivery) return res.status(404).json({ error: 'entrega não encontrada' });
+  if (!delivery.reason)
+    return res.status(400).json({ error: 'marque o motivo da anomalia antes de salvar' });
+
+  try {
+    flushQueue();
+  } catch (error) {
+    if (!(error instanceof FolderUnavailable)) throw error;
+  }
+
+  const fresh = getOrder(req.params.id);
+  const atual = fresh.deliveries.find((row) => row.seq === seq);
+  const summary = await writeSummary(fresh, atual, atual.attachments);
+  const arquivos = atual.attachments.filter((item) => item.kind === 'arquivo');
+  res.json({
+    id: summary.id,
+    folder:
+      summary.status === 'no_s' && summary.path
+        ? path.dirname(summary.path)
+        : folderFor(fresh, atual),
+    saved: arquivos.filter((item) => item.status === 'no_s').length,
+    pending: arquivos.filter((item) => item.status !== 'no_s').length,
+    summary,
+  });
 });
 
 app.post('/api/attachments/flush', (req, res) => {
@@ -365,6 +491,26 @@ async function runScan(force = false) {
   } catch (error) {
     console.error('fila de anexos:', error.message);
   }
+  try {
+    // arquivo apagado direto na pasta da rede também sai da lista do pedido
+    const reconcil = removeMissingAttachments();
+    if (reconcil.removed) console.log(`Anexos: ${reconcil.removed} apagados da pasta saíram do sistema`);
+  } catch (error) {
+    console.error('conferência de anexos:', error.message);
+  }
+  try {
+    // pedido novo pode completar o faturamento que já estava na pasta
+    const billing = await syncBilling({ force: force || result.lastScan.imported > 0 });
+    if (billing.lastSync.orders)
+      console.log(
+        `Faturamento: ${billing.lastSync.orders} pedidos com dados do ERP (${billing.lastSync.unmatchedRows} linhas sem pedido)`,
+      );
+    // recalcula placas/instrução filial também quando o código muda, sem reimportar o ERP
+    refreshAutoFields();
+  } catch (error) {
+    console.error('faturamento:', error.message);
+  }
+  startBillingWatch();
   fillMissingDistances().catch((error) => console.error('rotas falharam:', error.message));
   return result;
 }
@@ -385,7 +531,19 @@ app.use((error, req, res, next) => {
 });
 
 if (fs.existsSync(DIST_DIR)) {
-  app.use(express.static(DIST_DIR, { index: false, maxAge: '1h' }));
+  app.use(
+    express.static(DIST_DIR, {
+      index: false,
+      maxAge: '1h',
+      setHeaders(res, filePath) {
+        // o app novo só chega se o service worker e o HTML forem reconferidos a cada abertura
+        const name = path.basename(filePath);
+        if (name === 'sw.js' || name === 'index.html' || name === 'manifest.webmanifest') {
+          res.set('Cache-Control', 'no-cache');
+        }
+      },
+    }),
+  );
   app.get(/^(?!\/api\/).*/, (req, res) => res.sendFile(path.join(DIST_DIR, 'index.html')));
 } else {
   app.get('/', (req, res) =>
@@ -394,7 +552,7 @@ if (fs.existsSync(DIST_DIR)) {
 }
 
 const server = app.listen(PORT, HOST, () => {
-  console.log(`Expedição de carne em http://localhost:${PORT}`);
+  console.log(`Acompanhamento de entregas HAJAN em http://localhost:${PORT}`);
   const lan = lanUrl();
   if (lan) console.log(`Na rede da empresa: ${lan}`);
   const tunel = tunnelUrl();
@@ -402,6 +560,7 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`Link para trabalhar de fora: ${origem}/api/visita?token=${VISITA_TOKEN}`);
   if (!tunel) console.log('  (instale o Tailscale neste computador para o link funcionar)');
   startWatch();
+  startBillingWatch();
   runScan().then((result) => {
     console.log(
       `Leitura inicial: ${result.lastScan.imported} importados, ${result.lastScan.skipped} inalterados, ${result.lastScan.errors} com erro (${result.lastScanMs} ms)`,
