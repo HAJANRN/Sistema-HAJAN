@@ -12,16 +12,26 @@ export function EmissorPedidoScreen() {
   const [base, setBase] = useState<BaseEmissor | null>(null);
   const [chave, setChave] = useState(0);
   const [erro, setErro] = useState<string | null>(null);
+  const [tentativa, setTentativa] = useState(0);
 
-  const carregar = useCallback(() => {
+  // O StrictMode roda o efeito duas vezes: o cleanup aborta a primeira carga em
+  // vez de deixá-la competir com a segunda (e de responder depois da desmontagem).
+  useEffect(() => {
+    const controle = new AbortController();
     setErro(null);
     api
-      .emissorBase()
-      .then(setBase)
-      .catch((cause) => setErro(cause instanceof Error ? cause.message : 'sem resposta do servidor'));
-  }, []);
+      .emissorBase(controle.signal)
+      .then((dados) => {
+        if (!controle.signal.aborted) setBase(dados);
+      })
+      .catch((cause) => {
+        if (controle.signal.aborted) return;
+        setErro(cause instanceof Error ? cause.message : 'sem resposta do servidor');
+      });
+    return () => controle.abort();
+  }, [tentativa]);
 
-  useEffect(() => carregar(), [carregar]);
+  const carregar = useCallback(() => setTentativa((n) => n + 1), []);
 
   if (erro) {
     return (

@@ -10,7 +10,7 @@ import type {
   OrderPatch,
   Papel,
 } from './types';
-import type { BaseEmissor, ClonePayload } from './emissor/tipos';
+import type { BaseEmissor, ClonePayload, EntregaForm, PedidoForm, ProdutoForm } from './emissor/tipos';
 
 /** O servidor pode demorar ao gravar a anomalia no S:; 20 s evita marcar como offline sem motivo. */
 const TIMEOUT_MS = 20_000;
@@ -84,11 +84,24 @@ export interface ImportacaoResultado {
   contagens: { clientes: number; produtos: number; limites: number; unidades: number };
 }
 
+/**
+ * Corpo de `POST /api/emissor/pedidos`: o `PedidoForm` sem os ids locais da tela,
+ * que é exatamente o que `paraPayloadApi` devolve (o envelope não muda). Aceita
+ * também um `PedidoForm` inteiro, porque ali só há campos a mais.
+ */
+export type PedidoEnvio = Omit<PedidoForm, 'entregas'> & {
+  entregas: Array<
+    Omit<EntregaForm, 'id' | 'produtos'> & {
+      produtos: Array<Omit<ProdutoForm, 'id' | 'categoria'>>;
+    }
+  >;
+};
+
 async function requestForm<T>(path: string, form: FormData): Promise<T> {
   const response = await fetch(path, {
     method: 'POST',
     body: form,
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
   });
   if (!response.ok) {
     const body = await response.json().catch(() => null);
@@ -98,9 +111,11 @@ async function requestForm<T>(path: string, form: FormData): Promise<T> {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const limite = AbortSignal.timeout(TIMEOUT_MS);
   const response = await fetch(path, {
     ...init,
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    // Quem chama pode cancelar (StrictMode, troca de tela); o timeout vale junto.
+    signal: init?.signal ? AbortSignal.any([init.signal, limite]) : limite,
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
   });
   if (!response.ok) {
@@ -197,7 +212,7 @@ export const api = {
     request<EmissorLista>(
       `/api/emissor/pedidos?de=${encodeURIComponent(de)}&ate=${encodeURIComponent(ate)}`,
     ),
-  emissorBase: () => request<BaseEmissor>('/api/emissor/base'),
+  emissorBase: (signal?: AbortSignal) => request<BaseEmissor>('/api/emissor/base', { signal }),
   emissorCarteira: () => request<Carteira>('/api/emissor/carteira'),
   emissorClone: (numero: string, tipo: string) =>
     request<{
@@ -206,7 +221,7 @@ export const api = {
       payload?: ClonePayload;
       outroTipo?: string;
     }>(`/api/emissor/clones/${encodeURIComponent(numero)}?tipo=${encodeURIComponent(tipo)}`),
-  emitirPedido: (corpo: unknown) =>
+  emitirPedido: (corpo: PedidoEnvio) =>
     request<EmissaoResultado>('/api/emissor/pedidos', {
       method: 'POST',
       body: JSON.stringify(corpo),

@@ -26,6 +26,7 @@ function CampoNumero({
   className,
   inputMode,
   arredondar,
+  nome,
 }: {
   valor: number | null;
   onValor: (valor: number) => void;
@@ -35,6 +36,8 @@ function CampoNumero({
   inputMode?: 'numeric' | 'decimal';
   /** Quantidade é inteira, como no Emissor. */
   arredondar?: boolean;
+  /** Nome acessível: dentro da tabela não há <label> em volta. */
+  nome?: string;
 }) {
   const [texto, setTexto] = useState<string | null>(null);
   const exibido = texto ?? (valor === null ? '' : String(valor).replace('.', ','));
@@ -43,6 +46,7 @@ function CampoNumero({
     <input
       className={className}
       inputMode={inputMode}
+      aria-label={nome}
       value={exibido}
       onChange={(event) => {
         const bruto = event.target.value;
@@ -142,16 +146,19 @@ export function EntregaCard({ entrega, indice, total, base, dispatch }: Props) {
             <option value={9}>9</option>
           </select>
         </label>
-        <label>
-          <span>Destino</span>
-          <input
-            list="destinos-pedido"
-            value={entrega.destino}
-            onChange={(event) =>
-              dispatch({ tipo: 'campoEntrega', id: entrega.id, campo: 'destino', valor: event.target.value })
-            }
-          />
-        </label>
+        {/* Destino é só da operação 3 (spec); na 9 o campo não existe e o reducer o ignora. */}
+        {entrega.operacao === 3 && (
+          <label>
+            <span>Destino</span>
+            <input
+              list="destinos-pedido"
+              value={entrega.destino}
+              onChange={(event) =>
+                dispatch({ tipo: 'campoEntrega', id: entrega.id, campo: 'destino', valor: event.target.value })
+              }
+            />
+          </label>
+        )}
         {esc && (
           <label>
             <span>Peso manual (kg)</span>
@@ -172,87 +179,113 @@ export function EntregaCard({ entrega, indice, total, base, dispatch }: Props) {
           <table className="emissor-tabela">
             <thead>
               <tr>
-                <th>Produto</th>
-                <th>Qtde.</th>
-                <th>Unid.</th>
-                <th>Peso</th>
-                <th>Preço</th>
-                <th>Prazo</th>
-                <th />
+                <th scope="col">Produto</th>
+                <th scope="col">Qtde.</th>
+                <th scope="col">Unid.</th>
+                <th scope="col">Peso</th>
+                <th scope="col">Preço</th>
+                <th scope="col">Prazo</th>
+                <th scope="col" aria-label="Ações" />
               </tr>
             </thead>
             <tbody>
-              {entrega.produtos.map((produto) => (
-                <tr key={produto.id}>
-                  <td>
-                    <select
-                      value={produto.codigo}
-                      onChange={(event) => {
-                        const escolhido = base.produtos.find((p) => p.codigo === event.target.value);
-                        if (escolhido) {
-                          dispatch({
-                            tipo: 'produtoDoCatalogo',
-                            entregaId: entrega.id,
-                            produtoId: produto.id,
-                            produto: escolhido,
-                          });
+              {entrega.produtos.map((produto, linha) => {
+                const nome = produto.descricao || produto.codigo || `item ${linha + 1}`;
+                // Código vindo de um clone pode não existir mais no catálogo: sem esta
+                // opção o <select> apareceria em branco e preso no valor antigo.
+                const foraDoCatalogo =
+                  produto.codigo !== '' && !base.produtos.some((p) => p.codigo === produto.codigo);
+                return (
+                  <tr key={produto.id}>
+                    <td>
+                      <select
+                        aria-label={`Produto da linha ${linha + 1}`}
+                        value={produto.codigo}
+                        onChange={(event) => {
+                          const codigo = event.target.value;
+                          if (codigo === '') {
+                            // "—" limpa o produto; sem isso o código antigo ficaria preso.
+                            dispatch({ tipo: 'limparProduto', entregaId: entrega.id, produtoId: produto.id });
+                            return;
+                          }
+                          const escolhido = base.produtos.find((p) => p.codigo === codigo);
+                          if (escolhido) {
+                            dispatch({
+                              tipo: 'produtoDoCatalogo',
+                              entregaId: entrega.id,
+                              produtoId: produto.id,
+                              produto: escolhido,
+                            });
+                          }
+                        }}
+                      >
+                        <option value="">—</option>
+                        {foraDoCatalogo && <option value={produto.codigo}>{produto.codigo} (fora do catálogo)</option>}
+                        {base.produtos.map((p) => (
+                          <option key={p.codigo} value={p.codigo}>
+                            {p.rotulo}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <CampoNumero
+                        className="num"
+                        inputMode="numeric"
+                        arredondar
+                        nome={`Quantidade — ${nome}`}
+                        valor={produto.qtd}
+                        onValor={(valor) => campoProduto(produto, 'qtd', valor)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        aria-label={`Unidade — ${nome}`}
+                        value={produto.unidade}
+                        onChange={(event) => campoProduto(produto, 'unidade', event.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <CampoNumero
+                        className="num"
+                        inputMode="decimal"
+                        nome={`Peso unitário — ${nome}`}
+                        valor={produto.peso}
+                        onValor={(valor) => campoProduto(produto, 'peso', valor)}
+                      />
+                    </td>
+                    <td>
+                      <CampoNumero
+                        className="num"
+                        inputMode="decimal"
+                        nome={`Preço unitário — ${nome}`}
+                        valor={produto.preco}
+                        onValor={(valor) => campoProduto(produto, 'preco', valor)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        aria-label={`Prazo — ${nome}`}
+                        value={produto.prazo}
+                        onChange={(event) => campoProduto(produto, 'prazo', event.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn ghost small"
+                        aria-label={`Remover produto da linha ${linha + 1}`}
+                        disabled={entrega.produtos.length <= 1}
+                        onClick={() =>
+                          dispatch({ tipo: 'removerProduto', entregaId: entrega.id, produtoId: produto.id })
                         }
-                      }}
-                    >
-                      <option value="">—</option>
-                      {base.produtos.map((p) => (
-                        <option key={p.codigo} value={p.codigo}>
-                          {p.rotulo}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <CampoNumero
-                      className="num"
-                      inputMode="numeric"
-                      arredondar
-                      valor={produto.qtd}
-                      onValor={(valor) => campoProduto(produto, 'qtd', valor)}
-                    />
-                  </td>
-                  <td>
-                    <input value={produto.unidade} onChange={(event) => campoProduto(produto, 'unidade', event.target.value)} />
-                  </td>
-                  <td>
-                    <CampoNumero
-                      className="num"
-                      inputMode="decimal"
-                      valor={produto.peso}
-                      onValor={(valor) => campoProduto(produto, 'peso', valor)}
-                    />
-                  </td>
-                  <td>
-                    <CampoNumero
-                      className="num"
-                      inputMode="decimal"
-                      valor={produto.preco}
-                      onValor={(valor) => campoProduto(produto, 'preco', valor)}
-                    />
-                  </td>
-                  <td>
-                    <input value={produto.prazo} onChange={(event) => campoProduto(produto, 'prazo', event.target.value)} />
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      className="btn ghost small"
-                      aria-label="Remover produto"
-                      disabled={entrega.produtos.length <= 1}
-                      onClick={() =>
-                        dispatch({ tipo: 'removerProduto', entregaId: entrega.id, produtoId: produto.id })
-                      }
-                    >
-                      ✕
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                      >
+                        ✕
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           <div className="emissor-entrega-pe">
@@ -264,7 +297,7 @@ export function EntregaCard({ entrega, indice, total, base, dispatch }: Props) {
               + Produto
             </button>
             <span className="tabular">
-              Peso {formatarNumero(pesoEntrega(entrega))} kg · Valor R$ {formatarMoeda(valorEntrega(entrega))}
+              Peso {formatarNumero(pesoEntrega(entrega), 1)} kg · Valor R$ {formatarMoeda(valorEntrega(entrega))}
             </span>
           </div>
         </>

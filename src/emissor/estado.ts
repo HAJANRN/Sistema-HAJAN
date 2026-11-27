@@ -39,6 +39,7 @@ export type Acao =
   | { tipo: 'novoProduto'; entregaId: string }
   | { tipo: 'campoProduto'; entregaId: string; produtoId: string; campo: keyof ProdutoForm; valor: string | number }
   | { tipo: 'produtoDoCatalogo'; entregaId: string; produtoId: string; produto: ProdutoBase }
+  | { tipo: 'limparProduto'; entregaId: string; produtoId: string }
   | { tipo: 'removerProduto'; entregaId: string; produtoId: string }
   | { tipo: 'aplicarClone'; payload: ClonePayload; base: BaseEmissor }
   | { tipo: 'aviso'; texto: string }
@@ -154,11 +155,13 @@ export function aplicarClone(estadoAtual: Estado, payload: ClonePayload, base: B
   const hoje = isoHoje();
   const entregas: EntregaForm[] = (payload.entregas ?? []).map((entrega) => {
     const prazo = prazoDoCliente(base, entrega.cliente);
+    const operacao = entrega.operacao === 9 ? 9 : 3;
     return {
       id: novoId(),
       cliente: entrega.cliente,
-      operacao: entrega.operacao === 9 ? 9 : 3,
-      destino: entrega.destino ?? '',
+      operacao,
+      // Operação 9 não tem destino (spec): o clone não pode reintroduzi-lo.
+      destino: operacao === 9 ? '' : (entrega.destino ?? ''),
       pesoManual: entrega.peso_manual ?? null,
       produtos: (entrega.produtos ?? []).map((produto) => ({
         id: novoId(),
@@ -212,6 +215,15 @@ function produtoComCampo(
   return copia;
 }
 
+/**
+ * Produto sem código: linha vazia depois de escolher "—" no seletor (o clone de
+ * um código fora do catálogo não fica preso). O servidor recusa a emissão
+ * enquanto não houver produto escolhido, que é o mesmo que a linha em branco diz.
+ */
+function produtoLimpo(produto: ProdutoForm): ProdutoForm {
+  return { ...produto, codigo: '', descricao: '', categoria: '', qtd: 1, peso: 0, preco: 0 };
+}
+
 const mover = <T,>(lista: T[], indice: number, direcao: -1 | 1): T[] => {
   const destino = indice + direcao;
   if (indice < 0 || destino < 0 || destino >= lista.length) return lista;
@@ -250,9 +262,12 @@ export function reduzir(estado: Estado, acao: Acao): Estado {
     case 'campoEntrega':
       return {
         ...estado,
-        entregas: estado.entregas.map((e) =>
-          e.id === acao.id ? { ...e, [acao.campo]: acao.valor } : e,
-        ),
+        entregas: estado.entregas.map((e) => {
+          if (e.id !== acao.id) return e;
+          // Operação 9 não tem destino (spec): nem um dispatch direto o reintroduz.
+          if (acao.campo === 'destino' && e.operacao === 9) return e;
+          return { ...e, [acao.campo]: acao.valor };
+        }),
       };
     case 'operacao':
       return trocarOperacao(estado, acao.id, acao.valor);
@@ -311,6 +326,18 @@ export function reduzir(estado: Estado, acao: Acao): Estado {
                       }
                     : p,
                 ),
+              }
+            : e,
+        ),
+      };
+    case 'limparProduto':
+      return {
+        ...estado,
+        entregas: estado.entregas.map((e) =>
+          e.id === acao.entregaId
+            ? {
+                ...e,
+                produtos: e.produtos.map((p) => (p.id === acao.produtoId ? produtoLimpo(p) : p)),
               }
             : e,
         ),
