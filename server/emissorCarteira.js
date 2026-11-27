@@ -5,8 +5,8 @@ import { CARTEIRA_DIR, CREDITO_JSON } from './config.js';
 
 const TTL_MS = 60_000;
 let cache = { chave: '', quando: 0, valor: null };
-/** Assinatura da pasta memorizada (lista assinada dos arquivos do grupo). */
-let assinatura = { quando: 0, carimbo: '', lista: [] };
+/** Assinatura memorizada do grupo: arquivos + mtime + tamanho, e a data de referência. */
+let assinatura = null;
 
 /** Campos numéricos da planilha; sem nenhum deles o arquivo não serve. */
 const CAMPOS_VALOR = ['limite', 'saldoFinanceiro', 'saldoCarteira', 'saldoCredito'];
@@ -29,45 +29,76 @@ const COLUNAS = {
   status: ['STATUS', 'STATUS DO CLIENTE'],
 };
 
-/** Carimbo barato da pasta (um `stat`), para antecipar a chegada de arquivo novo. */
-function carimboDaPasta() {
-  try {
-    const info = fs.statSync(CARTEIRA_DIR);
-    return `${info.mtimeMs}:${info.size}`;
-  } catch {
-    return 'sem-pasta';
-  }
-}
+const NOME_CARTEIRA = /^CARTEIRA DE TERCEIRO.*\.xlsx$/i;
 
-function varrerPasta() {
+/** Nomes dos arquivos da carteira na pasta; pasta ilegível é pasta vazia (como o legado). */
+function nomesDaPasta() {
   try {
-    return fs
-      .readdirSync(CARTEIRA_DIR)
-      .filter((nome) => /^CARTEIRA DE TERCEIRO.*\.xlsx$/i.test(nome))
-      .map((nome) => {
-        const caminho = path.join(CARTEIRA_DIR, nome);
-        const info = fs.statSync(caminho);
-        return { nome, caminho, mtime: info.mtimeMs, tamanho: info.size };
-      });
+    return fs.readdirSync(CARTEIRA_DIR).filter((nome) => NOME_CARTEIRA.test(nome));
   } catch {
     return [];
   }
 }
 
+/** Arquivo assinado por nome/mtime/tamanho; ilegível é descartado, como o `except OSError` do legado. */
+function assinar(nome) {
+  const caminho = path.join(CARTEIRA_DIR, nome);
+  try {
+    const info = fs.statSync(caminho);
+    return { nome, caminho, mtime: info.mtimeMs, tamanho: info.size };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Arquivos da pasta, assinados por nome/mtime/tamanho.
- * O legado memorizava essa assinatura por 60 s: conferir ~1400 arquivos no SMB a cada
- * requisição não é barato. O carimbo da própria pasta (um `stat`, barato) antecipa a
- * chegada de arquivo novo; remoção e alteração de conteúdo aparecem na expiração do TTL,
- * como no legado, e aí a assinatura inteira é refeita.
+ * Assinatura completa do grupo vigente (o de data mais recente no nome): nome, mtime e
+ * tamanho de cada arquivo dele. Fica memorizada por 60 s, como o `_assinatura_carteira_credito`
+ * do legado — conferir ~1400 arquivos no SMB a cada requisição não é barato. Dentro da janela
+ * os dados são reaproveitados; ao expirar, a assinatura inteira é refeita.
+ * O mtime da própria pasta não serve de carimbo: no Windows ele não muda de forma confiável
+ * a cada criação, e um arquivo novo ficaria invisível até a janela vencer.
  */
-function arquivos() {
+function assinaturaDoGrupo() {
   const agora = Date.now();
-  const carimbo = carimboDaPasta();
-  if (agora - assinatura.quando < TTL_MS && assinatura.carimbo === carimbo) return assinatura.lista;
-  const lista = varrerPasta();
-  assinatura = { quando: agora, carimbo, lista };
-  return lista;
+  if (assinatura && agora - assinatura.quando < TTL_MS) return assinatura;
+
+  const nomes = nomesDaPasta();
+  const porData = new Map();
+  for (const nome of nomes) {
+    const data = dataDoNome(nome);
+    if (data > 0) {
+      const doDia = porData.get(data) ?? [];
+      doDia.push(nome);
+      porData.set(data, doDia);
+    }
+  }
+
+  let referencia = 0;
+  let candidatos = [];
+  if (porData.size > 0) {
+    referencia = Math.max(...porData.keys());
+    candidatos = porData.get(referencia);
+  } else {
+    // Nome sem data legível: a escolha cai no mtime mais recente e só aí a pasta inteira é
+    // statada (caso patológico); o resultado também fica memorizado na janela.
+    candidatos = nomes;
+  }
+
+  let lista = [...candidatos].sort((a, b) => a.localeCompare(b)).map(assinar).filter(Boolean);
+  if (referencia === 0 && lista.length > 0) {
+    const escolhido = lista.reduce((melhor, atual) => (atual.mtime > melhor.mtime ? atual : melhor));
+    lista = [escolhido];
+    referencia = escolhido.mtime;
+  }
+  assinatura = { quando: agora, referencia, lista };
+  return assinatura;
+}
+
+/** Zera as memórias da carteira (assinatura e valor lido): cada leitura recomeça do zero. */
+export function limparCache() {
+  cache = { chave: '', quando: 0, valor: null };
+  assinatura = null;
 }
 
 const MESES = { jan: 1, fev: 2, mar: 3, abr: 4, mai: 5, jun: 6, jul: 7, ago: 8, set: 9, out: 10, nov: 11, dez: 12 };
@@ -192,7 +223,7 @@ function lerMedia() {
 }
 
 export function carteira() {
-  const lista = arquivos();
+  const { lista, referencia } = assinaturaDoGrupo();
   const chave = [
     ...lista.map((a) => `${a.nome}:${a.mtime}:${a.tamanho}`),
     fs.existsSync(CREDITO_JSON) ? String(fs.statSync(CREDITO_JSON).mtimeMs) : 'sem-media',
@@ -208,20 +239,8 @@ export function carteira() {
     return vazio;
   }
 
-  const comData = lista.filter((arquivo) => dataDoNome(arquivo.nome) > 0);
-  let grupo;
-  let quando;
-  if (comData.length > 0) {
-    quando = Math.max(...comData.map((arquivo) => dataDoNome(arquivo.nome)));
-    grupo = comData.filter((arquivo) => dataDoNome(arquivo.nome) === quando);
-  } else {
-    const escolhido = lista.reduce((melhor, atual) => (atual.mtime > melhor.mtime ? atual : melhor));
-    grupo = [escolhido];
-    quando = escolhido.mtime;
-  }
-
   const colecao = new Map();
-  for (const arquivo of [...grupo].sort((a, b) => a.nome.localeCompare(b.nome))) {
+  for (const arquivo of lista) {
     try {
       lerArquivo(arquivo, colecao);
     } catch {
@@ -234,7 +253,7 @@ export function carteira() {
   const valor = {
     disponivel: true,
     // Nenhum arquivo legível: sem data autoritativa para exibir (como o legado).
-    data: Object.keys(registros).length > 0 ? dataBr(quando) : '',
+    data: Object.keys(registros).length > 0 ? dataBr(referencia) : '',
     registros,
     media: lerMedia(),
   };

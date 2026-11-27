@@ -1,12 +1,21 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { after, test } from 'node:test';
+import { after, beforeEach, test } from 'node:test';
 import XLSX from 'xlsx';
 import { montarApi } from './helpers.ts';
 
 const api = await montarApi();
 after(() => api.fechar());
+
+// Import dinâmico, depois do `montarApi()`: `config.js` congela `CARTEIRA_DIR` no import.
+const { limparCache } = await import('../server/emissorCarteira.js');
+
+/**
+ * A carteira memoriza assinatura e resultado por 60 s; sem o reset, um teste herda a
+ * resposta do anterior e a suíte fica dependente da ordem (era a falha intermitente).
+ */
+beforeEach(() => limparCache());
 
 const COLUNAS = [
   'Codigo',
@@ -136,4 +145,28 @@ test('planilha sem nenhuma coluna reconhecida é ignorada', async () => {
   assert.equal(corpo.disponivel, true);
   assert.equal(corpo.data, '');
   assert.deepEqual(corpo.registros, {});
+});
+
+test('dentro da janela de 60 s o grupo memorizado é reaproveitado; o reset o refaz', async () => {
+  escreverPlanilha('CARTEIRA DE TERCEIRO - DIVISÃO 1 20dez2026.xlsx', [
+    COLUNAS,
+    ['700', 'Cliente de Hoje', 9000, 0, 0, 9000, 'Liberado'],
+  ]);
+  const primeiro = await (await api.get('/api/emissor/carteira')).json();
+  assert.equal(primeiro.data, '20/12/2026');
+
+  // Arquivo novo no meio da janela: a assinatura está memorizada, então só aparece quando
+  // ela é refeita. Nada de carimbo de mtime da pasta, que no Windows não muda de forma confiável.
+  escreverPlanilha('CARTEIRA DE TERCEIRO - DIVISÃO 1 21dez2026.xlsx', [
+    COLUNAS,
+    ['700', 'Cliente de Amanhã', 12000, 0, 0, 12000, 'Liberado'],
+  ]);
+  const dentroDaJanela = await (await api.get('/api/emissor/carteira')).json();
+  assert.equal(dentroDaJanela.data, '20/12/2026');
+  assert.equal(dentroDaJanela.registros['700'].limite, 9000);
+
+  limparCache();
+  const depoisDoReset = await (await api.get('/api/emissor/carteira')).json();
+  assert.equal(depoisDoReset.data, '21/12/2026');
+  assert.equal(depoisDoReset.registros['700'].limite, 12000);
 });
