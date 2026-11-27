@@ -641,7 +641,7 @@ export interface BaseEmissor {
   unidades: UnidadeBase[];
   /** Maior número do histórico + 1 (sugestão para o formulário). */
   proximoNumero: string;
-  /** Destinos vistos no histórico; SEM DESTINO primeiro. */
+  /** Todos os clientes; SEM DESTINO primeiro (operação 3). */
   destinos: string[];
 }
 
@@ -1480,6 +1480,7 @@ const base: BaseEmissor = {
     { codigo: '1000', descricao: 'PATINHO', rotulo: '1000 - PATINHO', unidade: 'CX', peso: 15.5, categoria: 'CXS' },
   ],
   unidades: [{ sigla: 'MRB', nome: 'MATRIZ', rotulo: 'MRB - MATRIZ', critica: 'NÃO' }],
+  destinos: ['SEM DESTINO', 'Cliente A'],
 };
 
 const clone: ClonePayload = {
