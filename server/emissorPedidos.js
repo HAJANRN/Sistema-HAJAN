@@ -43,7 +43,8 @@ router.get('/base', (req, res) => {
       .get().m;
 
     // destinos da operação 3: todos os clientes, SEM DESTINO primeiro (listar_destinos_operacao_3)
-    const destinos = ['SEM DESTINO', ...clientes.map((cliente) => cliente.nome)];
+    // o legado deduplica com `set`; cliente homônimo não pode aparecer duas vezes na lista
+    const destinos = [...new Set(['SEM DESTINO', ...clientes.map((cliente) => cliente.nome)])];
 
     const revision = String(fs.statSync(DB_FILE).mtimeMs);
     res.json({
@@ -63,6 +64,8 @@ router.get('/carteira', (req, res) => {
   try {
     res.json(carteira());
   } catch (erro) {
-    res.status(500).json({ error: `não consegui ler a carteira: ${erro.message}` });
+    // o detalhe pode conter caminho do SMB: fica no log do servidor, não na resposta
+    console.error('não consegui ler a carteira:', erro);
+    res.status(500).json({ error: 'não consegui ler a carteira de crédito' });
   }
 });

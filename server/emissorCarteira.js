@@ -5,6 +5,11 @@ import { CARTEIRA_DIR, CREDITO_JSON } from './config.js';
 
 const TTL_MS = 60_000;
 let cache = { chave: '', quando: 0, valor: null };
+/** Assinatura da pasta memorizada (lista assinada dos arquivos do grupo). */
+let assinatura = { quando: 0, carimbo: '', lista: [] };
+
+/** Campos numéricos da planilha; sem nenhum deles o arquivo não serve. */
+const CAMPOS_VALOR = ['limite', 'saldoFinanceiro', 'saldoCarteira', 'saldoCredito'];
 
 const normalizar = (texto) =>
   String(texto ?? '')
@@ -24,7 +29,17 @@ const COLUNAS = {
   status: ['STATUS', 'STATUS DO CLIENTE'],
 };
 
-function arquivos() {
+/** Carimbo barato da pasta (um `stat`), para antecipar a chegada de arquivo novo. */
+function carimboDaPasta() {
+  try {
+    const info = fs.statSync(CARTEIRA_DIR);
+    return `${info.mtimeMs}:${info.size}`;
+  } catch {
+    return 'sem-pasta';
+  }
+}
+
+function varrerPasta() {
   try {
     return fs
       .readdirSync(CARTEIRA_DIR)
@@ -37,6 +52,22 @@ function arquivos() {
   } catch {
     return [];
   }
+}
+
+/**
+ * Arquivos da pasta, assinados por nome/mtime/tamanho.
+ * O legado memorizava essa assinatura por 60 s: conferir ~1400 arquivos no SMB a cada
+ * requisição não é barato. O carimbo da própria pasta (um `stat`, barato) antecipa a
+ * chegada de arquivo novo; remoção e alteração de conteúdo aparecem na expiração do TTL,
+ * como no legado, e aí a assinatura inteira é refeita.
+ */
+function arquivos() {
+  const agora = Date.now();
+  const carimbo = carimboDaPasta();
+  if (agora - assinatura.quando < TTL_MS && assinatura.carimbo === carimbo) return assinatura.lista;
+  const lista = varrerPasta();
+  assinatura = { quando: agora, carimbo, lista };
+  return lista;
 }
 
 const MESES = { jan: 1, fev: 2, mar: 3, abr: 4, mai: 5, jun: 6, jul: 7, ago: 8, set: 9, out: 10, nov: 11, dez: 12 };
@@ -97,46 +128,44 @@ function lerArquivo(arquivo, colecao) {
   const linhas = XLSX.utils.sheet_to_json(livro.Sheets[aba], { header: 1, raw: true, defval: '' });
   const cabecalho = linhas.findIndex((linha) => {
     const mapa = mapearCabecalho(linha);
-    return mapa.codigo >= 0 && mapa.nome >= 0 && (mapa.saldoCredito >= 0 || mapa.limite >= 0);
+    return mapa.codigo >= 0 && mapa.nome >= 0 && CAMPOS_VALOR.some((campo) => mapa[campo] >= 0);
   });
   if (cabecalho < 0) return;
   const mapa = mapearCabecalho(linhas[cabecalho]);
+  // Só entram os campos que a planilha realmente tem: coluna ausente não vira zero,
+  // senão um arquivo sem "Limite" zeraria o limite da base ao consolidar.
+  const presentes = CAMPOS_VALOR.filter((campo) => mapa[campo] >= 0);
   for (const linha of linhas.slice(cabecalho + 1)) {
     const codigo = codigoPlanilha(linha[mapa.codigo]);
     if (!codigo || codigo === '0') continue;
-    const numero = (campo) => {
-      const indice = mapa[campo];
-      if (indice < 0) return 0;
-      const valor = Number(linha[indice]);
-      return Number.isFinite(valor) ? valor : 0;
-    };
-    const texto = (campo) => (mapa[campo] >= 0 ? String(linha[mapa[campo]] ?? '').trim() : '');
+    const item = { nome: String(linha[mapa.nome] ?? '').trim() };
+    for (const campo of presentes) {
+      const valor = Number(linha[mapa[campo]]);
+      item[campo] = Number.isFinite(valor) ? valor : 0;
+    }
+    item.status = mapa.status >= 0 ? String(linha[mapa.status] ?? '').trim() : '';
     const itens = colecao.get(codigo) ?? [];
-    itens.push({
-      nome: texto('nome'),
-      limite: numero('limite'),
-      saldoFinanceiro: numero('saldoFinanceiro'),
-      saldoCarteira: numero('saldoCarteira'),
-      saldoCredito: numero('saldoCredito'),
-      status: texto('status'),
-    });
+    itens.push(item);
     colecao.set(codigo, itens);
   }
 }
 
-/** As divisões repetem o consolidado e trazem recortes parciais: prevalece o maior valor, e nome/status vêm da linha de maior limite. */
+/**
+ * As divisões repetem o consolidado e trazem recortes parciais: prevalece o maior valor,
+ * e nome/status vêm da linha de maior limite. Campo que nenhum arquivo trouxe fica ausente
+ * (o painel cai no valor da base em vez de zero).
+ */
 function consolidar(colecao) {
   const registros = {};
   for (const [codigo, itens] of colecao) {
-    const base = itens.reduce((melhor, item) => (item.limite > melhor.limite ? item : melhor), itens[0]);
-    registros[codigo] = {
-      nome: base.nome,
-      limite: Math.max(...itens.map((item) => item.limite)),
-      saldoFinanceiro: Math.max(...itens.map((item) => item.saldoFinanceiro)),
-      saldoCarteira: Math.max(...itens.map((item) => item.saldoCarteira)),
-      saldoCredito: Math.max(...itens.map((item) => item.saldoCredito)),
-      status: base.status || itens.find((item) => item.status)?.status || '',
-    };
+    const base = itens.reduce((melhor, item) => ((item.limite ?? 0) > (melhor.limite ?? 0) ? item : melhor), itens[0]);
+    const registro = { nome: base.nome };
+    for (const campo of CAMPOS_VALOR) {
+      const valores = itens.filter((item) => item[campo] !== undefined).map((item) => item[campo]);
+      if (valores.length > 0) registro[campo] = Math.max(...valores);
+    }
+    registro.status = base.status || itens.find((item) => item.status)?.status || '';
+    registros[codigo] = registro;
   }
   return registros;
 }
@@ -193,13 +222,20 @@ export function carteira() {
 
   const colecao = new Map();
   for (const arquivo of [...grupo].sort((a, b) => a.nome.localeCompare(b.nome))) {
-    lerArquivo(arquivo, colecao);
+    try {
+      lerArquivo(arquivo, colecao);
+    } catch {
+      // xlsx truncado/zip inválido: ignora este arquivo e segue com os demais,
+      // como o `except Exception: continue` do leitor legado.
+    }
   }
 
+  const registros = consolidar(colecao);
   const valor = {
     disponivel: true,
-    data: dataBr(quando),
-    registros: consolidar(colecao),
+    // Nenhum arquivo legível: sem data autoritativa para exibir (como o legado).
+    data: Object.keys(registros).length > 0 ? dataBr(quando) : '',
+    registros,
     media: lerMedia(),
   };
   cache = { chave, quando: Date.now(), valor };

@@ -28,4 +28,7 @@ test('base traz clientes com limite e produtos com rótulo', async () => {
   assert.match(base.proximoNumero, /^\d+$/);
   assert.equal(base.destinos[0], 'SEM DESTINO');
   assert.ok(base.destinos.includes(base.clientes[0].nome));
+  // como o `set` do legado: destino repetido (cliente homônimo, "SEM DESTINO" na base) não duplica
+  assert.equal(new Set(base.destinos).size, base.destinos.length);
+  assert.equal(base.destinos.filter((destino: string) => destino === 'SEM DESTINO').length, 1);
 });
