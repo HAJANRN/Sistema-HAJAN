@@ -9,6 +9,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(here, '..');
 
 const NET_ROOT = process.env.FRIBOI_NET_ROOT ?? 'S:\\FRIBOI\\zzz Gestão Pedidos';
+const PEDIDOS_ROOT = process.env.FRIBOI_PEDIDOS_ROOT ?? 'S:\\FRIBOI\\Pedidos';
 
 const splitDirs = (value) =>
   value
@@ -22,11 +23,39 @@ export const XLSX_DIRS = splitDirs(process.env.FRIBOI_XLSX_DIRS) ?? [
   path.join(NET_ROOT, '@ Acompanhamento Pedido CXS'),
   path.join(NET_ROOT, '@@ ResumoSemanal CXS'),
   path.join(NET_ROOT, '@@ ResumoSemanal PÇS'),
+  path.join(PEDIDOS_ROOT, 'CHQ'),
 ];
 
-export const PDF_DIRS = splitDirs(process.env.FRIBOI_PDF_DIRS) ?? [path.join(ROOT, 'pedidos-pdf')];
+export const PDF_DIRS = splitDirs(process.env.FRIBOI_PDF_DIRS) ?? [
+  path.join(NET_ROOT, 'Pedidos Ped+'),
+  path.join(ROOT, 'pedidos-pdf'),
+];
 
-export const DB_FILE = process.env.FRIBOI_DB ?? path.join(ROOT, 'data', 'expedicao.db');
+/** Pasta onde o ERP exporta "CARTEIRA DE TERCEIRO*.xlsx". */
+export const CARTEIRA_DIR = process.env.FRIBOI_CARTEIRA_DIR ?? 'S:\\FRIBOI\\financeiro\\carteira clientes';
+
+/** Clone em JSON ao lado dos PDFs, para quando o banco não tiver o pedido. */
+export const CLONES_DIR = process.env.FRIBOI_CLONES_DIR ?? path.join(NET_ROOT, 'Pedidos Ped+', '_clone_data');
+
+/** Média de compras por cliente (JSON exportado pela análise de crédito); ausente = regra de média omitida. */
+export const CREDITO_JSON =
+  process.env.FRIBOI_CREDITO_JSON ?? path.join(ROOT, 'credito', 'decisao_credito.json');
+
+/** Faturamento do ERP: só leitura, usado para mostrar as NFs e o valor de cada pedido. */
+export const FATURAMENTO_DIRS = splitDirs(process.env.FRIBOI_FATURAMENTO_DIRS) ?? [
+  path.join(NET_ROOT, 'Dados de faturamento'),
+];
+
+/**
+ * Banco único do sistema (Acompanhamento + Emissor). Enquanto a unificação não é
+ * aplicada na máquina, cai no banco antigo do Acompanhamento.
+ */
+const bancoUnificado = path.join(ROOT, 'data', 'hajan.db');
+const bancoPadrao = fs.existsSync(bancoUnificado)
+  ? bancoUnificado
+  : path.join(ROOT, 'data', 'expedicao.db');
+
+export const DB_FILE = process.env.FRIBOI_DB ?? bancoPadrao;
 export const DIST_DIR = path.join(ROOT, 'dist');
 export const PORT = Number(process.env.PORT ?? 8787);
 export const HOST = process.env.FRIBOI_HOST ?? '0.0.0.0';
@@ -68,6 +97,7 @@ export const VISITA_DIAS = Number(process.env.FRIBOI_VISITA_DIAS ?? 30);
 /** Senha da área administrativa (importação, ajustes, servidor). Guardamos só o hash. */
 export const SENHA_ARQUIVO = path.join(ROOT, 'data', 'senha-admin.txt');
 export const SENHA_AMBIENTE = process.env.FRIBOI_SENHA ?? '';
+export const USUARIO_AMBIENTE = process.env.FRIBOI_USUARIO ?? 'admin';
 export const ADMIN_HORAS = Number(process.env.FRIBOI_SESSAO_ADMIN_HORAS ?? 12);
 
 /** Endereço que as outras máquinas da rede usam para chegar neste servidor. */
