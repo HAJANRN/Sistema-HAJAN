@@ -73,6 +73,9 @@ export const ANEXO_ROOT = process.env.FRIBOI_ANEXO_ROOT ?? 'S:\\FRIBOI\\infos re
 export const SPOOL_DIR = path.join(ROOT, 'data', 'anexos-fila');
 export const ANEXO_MAX_BYTES = Number(process.env.FRIBOI_ANEXO_MAX ?? 25 * 1024 * 1024);
 
+/** Snapshots do banco antes de cada importação (mantém os 10 mais recentes). */
+export const BACKUP_DIR = process.env.FRIBOI_BACKUP_DIR ?? path.join(ROOT, 'data', 'backups');
+
 /**
  * Chave do acesso de fora (rede privada). Pode vir da variável de ambiente; sem ela geramos uma
  * na primeira execução e guardamos em data/chave-visita.txt, para o link continuar válido depois de
