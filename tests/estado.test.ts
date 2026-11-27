@@ -93,7 +93,7 @@ test('aplicar clone: data válida com hífen, inválida e vazia', () => {
   assert.equal(estado.dados.dataEntrega, hoje);
 });
 
-test('aplicar clone: unidade pela sigla e peso zero preservado', () => {
+test('peso do catálogo prevalece no clone; fora do catálogo preserva o payload', () => {
   const estado = aplicarClone(
     estadoInicial(base),
     {
@@ -105,7 +105,10 @@ test('aplicar clone: unidade pela sigla e peso zero preservado', () => {
           destino: 'SEM DESTINO',
           operacao: 3,
           produtos: [
+            // Código do catálogo: o peso do payload (0) é ignorado, vale o do catálogo.
             { codigo: '1000', descricao: 'PATINHO', qtd: 0, unidade: 'CX', peso: 0, preco: 0, prazo: '' },
+            // Código fora do catálogo: nada a sobrescrever, o peso do payload fica.
+            { codigo: '9999', descricao: 'ANTIGO', qtd: 2, unidade: 'CX', peso: 0, preco: 5, prazo: '' },
           ],
         },
       ],
@@ -113,8 +116,10 @@ test('aplicar clone: unidade pela sigla e peso zero preservado', () => {
     base,
   );
   assert.equal(estado.dados.unidade, 'MRB - MATRIZ');
-  assert.equal(estado.entregas[0].produtos[0].peso, 0);
+  assert.equal(estado.entregas[0].produtos[0].peso, 15.5);
   assert.equal(estado.entregas[0].produtos[0].qtd, 0);
+  assert.equal(estado.entregas[0].produtos[1].peso, 0);
+  assert.equal(estado.entregas[0].produtos[1].preco, 5);
 });
 
 test('aplicar clone sem entregas mantém as atuais como cópia', () => {

@@ -66,6 +66,13 @@ const numeroOu = (valor: unknown, padrao: number): number => {
   return padrao;
 };
 
+/**
+ * Produto do catálogo pelo código; código vazio nunca casa (a linha em branco do
+ * seletor não é um produto).
+ */
+const produtoDoCatalogoPorCodigo = (base: BaseEmissor, codigo: string): ProdutoBase | undefined =>
+  codigo === '' ? undefined : base.produtos.find((p) => p.codigo === codigo);
+
 const prazoDoCliente = (base: BaseEmissor, cliente: string) => {
   const nome = normalizarBusca(cliente);
   const achado = base.clientes.find(
@@ -164,19 +171,24 @@ export function aplicarClone(estadoAtual: Estado, payload: ClonePayload, base: B
       // Operação 9 não tem destino (spec): o clone não pode reintroduzi-lo.
       destino: operacao === 9 ? '' : (entrega.destino ?? ''),
       pesoManual: entrega.peso_manual ?? null,
-      produtos: (entrega.produtos ?? []).map((produto) => ({
-        id: novoId(),
-        codigo: produto.codigo,
-        descricao: produto.descricao,
-        qtd: numeroOu(produto.qtd, 0),
-        unidade: produto.unidade || 'kg',
-        peso: numeroOu(produto.peso, 1),
-        preco: numeroOu(produto.preco, 0),
-        prazo: produto.prazo || prazo,
-        // O clone não traz categoria: o produto herdado do catálogo continua herdando
-        // (sem entrada no catálogo, o servidor aplica PÇS, como antes).
-        categoria: '',
-      })),
+      produtos: (entrega.produtos ?? []).map((produto) => {
+        // O servidor recalcula com o peso do catálogo quando o código existe; manter o
+        // peso do clone antigo faria o total da tela divergir do PDF.
+        const catalogo = produtoDoCatalogoPorCodigo(base, produto.codigo);
+        return {
+          id: novoId(),
+          codigo: produto.codigo,
+          descricao: produto.descricao,
+          qtd: numeroOu(produto.qtd, 0),
+          unidade: produto.unidade || 'kg',
+          peso: catalogo ? catalogo.peso : numeroOu(produto.peso, 1),
+          preco: numeroOu(produto.preco, 0),
+          prazo: produto.prazo || prazo,
+          // O clone não traz categoria: o produto herdado do catálogo continua herdando
+          // (sem entrada no catálogo, o servidor aplica PÇS, como antes).
+          categoria: '',
+        };
+      }),
     };
   });
   // Clone sem entregas mantém as atuais (contrato do brief) como cópia, sem
